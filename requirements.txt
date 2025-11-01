@@ -1,0 +1,35 @@
+# Core System
+accelerate
+ray[default]>=2.47.0
+torch==2.6.0
+# Data processing
+pylatexenc
+datasets
+git+https://github.com/RLinf/latex2sympy2.git
+sentencepiece
+torchdata
+wandb
+word2number
+regex
+scipy
+# Utilities
+hydra-core==1.4.0.dev1
+einops
+nvitop
+pybind11
+torch-memory-saver
+setuptools>=69.5.1,<75.9
+# Logging
+swanlab
+tensorboard
+# Embodied dependencies
+prismatic
+transformers==4.40.1
+draccus
+rich
+tensorflow_graphics
+peft==0.11.1
+timm==0.9.10
+git+https://github.com/haosulab/ManiSkill.git
+tensordict
+git+https://github.com/Lifelong-Robot-Learning/LIBERO.git
