@@ -23,7 +23,7 @@ setuptools>=69.5.1,<75.9
 swanlab
 tensorboard
 # Embodied dependencies
-prismatic
+# prismatic
 transformers==4.40.1
 draccus
 rich
