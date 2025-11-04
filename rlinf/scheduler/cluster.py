@@ -144,6 +144,9 @@ class Cluster:
         if "RAY_DEDUP_LOGS" not in os.environ:
             # Default disabling deduplication of logs to ensure all logs are printed.
             ray_logging.RAY_DEDUP_LOGS = 0
+        # Ensure Ray uses a user-writable temp directory to avoid /tmp permission issues
+        self._ensure_ray_tmpdir()
+
         try:
             # First try to connect to an existing Ray cluster
             ray.init(
@@ -152,7 +155,7 @@ class Cluster:
                 namespace=Cluster.NAMESPACE,
                 runtime_env={"env_vars": dict(os.environ)},
             )
-        except ConnectionError:
+        except (ConnectionError, PermissionError, OSError, ValueError):
             ray.init(
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
@@ -239,15 +242,25 @@ class Cluster:
             sys.stdout.flush()
             sys.stderr.flush()
 
-            alive_actors = list_actors(
-                filters=[
-                    ("STATE", "=", "ALIVE"),
-                    ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
-                ]
-            )
-            for actor_state in alive_actors:
-                actor = ray.get_actor(actor_state.name)
-                ray.kill(actor, no_restart=True)
+            # Try to clean up actors, but gracefully handle cases with multiple Ray instances
+            try:
+                alive_actors = list_actors(
+                    filters=[
+                        ("STATE", "=", "ALIVE"),
+                        ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
+                    ]
+                )
+                for actor_state in alive_actors:
+                    try:
+                        actor = ray.get_actor(actor_state.name, namespace=Cluster.NAMESPACE)
+                        ray.kill(actor, no_restart=True)
+                    except Exception:
+                        # Ignore errors killing individual actors
+                        pass
+            except Exception:
+                # If we can't list actors (e.g., multiple Ray instances), skip cleanup
+                # Actors will be cleaned up when Ray shuts down
+                pass
 
             if ray.is_initialized():
                 # Mimic ray's sleep before shutdown to ensure log messages are flushed
@@ -259,12 +272,20 @@ class Cluster:
         signal.signal(signal.SIGUSR1, signal_handler)
 
     def _init_from_existing_managers(self):
+        # Ensure Ray uses a user-writable temp directory to avoid /tmp permission issues
+        self._ensure_ray_tmpdir()
         if not ray.is_initialized():
-            ray.init(
-                address="auto",
-                namespace=Cluster.NAMESPACE,
-                logging_level=Cluster.LOGGING_LEVEL,
-            )
+            try:
+                ray.init(
+                    address="auto",
+                    namespace=Cluster.NAMESPACE,
+                    logging_level=Cluster.LOGGING_LEVEL,
+                )
+            except (ConnectionError, PermissionError, OSError, ValueError):
+                ray.init(
+                    namespace=Cluster.NAMESPACE,
+                    logging_level=Cluster.LOGGING_LEVEL,
+                )
 
         from .manager.node_manager import NodeManager
 
@@ -285,6 +306,37 @@ class Cluster:
                     os.environ[env_var] = "INFO"
                 elif env_var == f"{system_name}_TIMEOUT":
                     os.environ[env_var] = "180"
+
+    def _ensure_ray_tmpdir(self):
+        """Ensure RAY_TMPDIR points to a user-writable directory and exists.
+
+        Ray by default uses /tmp/ray. On shared clusters this can lead to
+        PermissionError if that path is owned by another user. We redirect
+        Ray's temp directory to a per-user path under the project scratch
+        space if not already set.
+        """
+        if os.environ.get("RAY_TMPDIR"):
+            # Respect an explicitly provided path; just make sure it exists.
+            tmp_dir = os.environ["RAY_TMPDIR"]
+        else:
+            user = os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+            # Resolve repository root from this file: .../rlinf/scheduler/cluster.py -> repo root two levels up
+            repo_root = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+            )
+            tmp_dir = os.path.join(repo_root, ".ray_tmp", user)
+            os.environ["RAY_TMPDIR"] = tmp_dir
+
+        try:
+            os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
+        except Exception:
+            # As a last resort, do not crash here; leave to Ray to error with context
+            pass
+
+        # Align Python/tmp-based temp resolution with Ray temp to avoid /tmp usage
+        for k in ("TMPDIR", "TMP", "TEMP"):
+            if not os.environ.get(k):
+                os.environ[k] = tmp_dir
 
     @staticmethod
     def get_sys_env_var(env_var: str, default: Optional[str] = None) -> Optional[str]:
