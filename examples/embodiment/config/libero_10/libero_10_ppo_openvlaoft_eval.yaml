@@ -96,7 +96,7 @@ rollout:
     queue_size: 0
   mode: "colocate"
   generation_backend: "huggingface"
-  model_dir: "/scratch/cluster/jshim12/RLinf/model/Openvla-oft-SFT-libero10-traj1"
+  model_dir: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero10-traj1"
   enable_offload: False
   pipeline_stage_num: 1
 
@@ -107,7 +107,7 @@ actor:
     queue_name: "replay_buffer"
     queue_size: 0
   training_backend: "fsdp"
-  checkpoint_load_path: "/scratch/cluster/jshim12/RLinf/model/Openvla-oft-SFT-libero10-traj1"
+  checkpoint_load_path: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero10-traj1"
   checkpoint_save_path: "../results"
   micro_batch_size: 16
   global_batch_size: 1024
@@ -116,8 +116,8 @@ actor:
 
   model:
     model_name: "openvla_oft"
-    # ckpt_path: "/scratch/cluster/jshim12/RLinf/logs/base_to_task2_partial/checkpoints/global_step_40/actor/model.pt"
-    # ckpt_path: "/scratch/cluster/jshim12/RLinf/logs/task2_to_task3_partial/checkpoints/global_step_40/actor/model.pt"
+    # ckpt_path: "${oc.env:REPO_PATH}/logs/base_to_task2_partial/checkpoints/global_step_40/actor/model.pt"
+    # ckpt_path: "${oc.env:REPO_PATH}/logs/task2_to_task3_partial/checkpoints/global_step_40/actor/model.pt"
     value_type: ${algorithm.reward_type}  # 'action' or 'token'
     action_dim: 7
     num_action_chunks: 8
@@ -152,7 +152,7 @@ actor:
   
   tokenizer:
     tokenizer_type: "HuggingFaceTokenizer"
-    tokenizer_model: "/scratch/cluster/jshim12/RLinf/model/Openvla-oft-SFT-libero10-traj1"
+    tokenizer_model: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero10-traj1"
     use_fast: False
     trust_remote_code: True
     padding_side: "right"

@@ -1,4 +1,12 @@
 #! /bin/bash
+#
+# Setup script for running embodied agent evaluation
+#
+# Environment Variables (optional overrides):
+#   - LIBERO_REPO_PATH: Path to LIBERO repository (defaults to ${REPO_PATH}/LIBERO)
+#
+# Note: REPO_PATH is automatically set to the parent directory of examples/
+#       If you need to override it, set it before running this script.
 
 export EMBODIED_PATH="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export REPO_PATH=$(dirname $(dirname "$EMBODIED_PATH"))
@@ -8,7 +16,8 @@ export MUJOCO_GL="osmesa"
 export PYOPENGL_PLATFORM="osmesa"
 export PYTHONPATH=${REPO_PATH}:$PYTHONPATH
 # NOTE: set LIBERO_REPO_PATH to the path of the LIBERO repo
-export LIBERO_REPO_PATH="/scratch/cluster/jshim12/RLinf/LIBERO"
+# Defaults to ${REPO_PATH}/LIBERO if not set
+export LIBERO_REPO_PATH="${LIBERO_REPO_PATH:-${REPO_PATH}/LIBERO}"
 # NOTE: set LIBERO_CONFIG_PATH for libero/libero/__init__.py
 export LIBERO_CONFIG_PATH=${LIBERO_REPO_PATH}
 
@@ -23,9 +32,17 @@ else
     CONFIG_NAME=$1
 fi
 
+# Shift to get remaining arguments (Hydra overrides)
+if [ -n "$2" ]; then
+    shift
+    HYDRA_OVERRIDES="$@"
+else
+    HYDRA_OVERRIDES=""
+fi
+
 LOG_DIR="${REPO_PATH}/logs/evals" #/$(date +'%Y%m%d-%H:%M:%S')"
 MEGA_LOG_FILE="${LOG_DIR}/eval_embodiment.log"
 mkdir -p "${LOG_DIR}"
-CMD="python ${SRC_FILE} --config-path ${EMBODIED_PATH}/config/ --config-name ${CONFIG_NAME} runner.logger.log_path=${LOG_DIR}"
+CMD="python ${SRC_FILE} --config-path ${EMBODIED_PATH}/config/ --config-name ${CONFIG_NAME} runner.logger.log_path=${LOG_DIR} ${HYDRA_OVERRIDES}"
 echo ${CMD}
 ${CMD} 2>&1 | tee ${MEGA_LOG_FILE}

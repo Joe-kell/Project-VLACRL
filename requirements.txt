@@ -30,4 +30,8 @@ tensorflow_graphics
 peft==0.11.1
 timm==0.9.10
 tensordict
-git+https://github.com/Lifelong-Robot-Learning/LIBERO.git
+# git+https://github.com/Lifelong-Robot-Learning/LIBERO.git
+robosuite==1.4.1
+bddl
+easydict
+gym
