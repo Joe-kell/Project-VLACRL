@@ -324,7 +324,7 @@ class Cluster:
             repo_root = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
             )
-            tmp_dir = os.path.join(repo_root, ".ray_tmp", user)
+            tmp_dir = os.path.join(repo_root, ".ray_tmp")
             os.environ["RAY_TMPDIR"] = tmp_dir
 
         try:
