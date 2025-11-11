@@ -50,10 +50,11 @@ class EmbodiedEvalRunner:
                 results for results in rollout_results if results is not None
             ]
             eval_metrics = compute_evaluate_metrics(eval_metrics_list)
+            aggregated_eval_metrics.append(eval_metrics)
 
         final_metrics = {}
-        for k in eval_metrics[0].keys():
-            vals = [m[k] for m in eval_metrics]
+        for k in aggregated_eval_metrics[0].keys():
+            vals = [m[k] for m in aggregated_eval_metrics]
             final_metrics[k] = sum(vals) / len(vals)
         return final_metrics
 
