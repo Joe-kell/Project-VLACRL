@@ -45,6 +45,7 @@ algorithm:
   n_eval_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   num_group_envs: 8
   rollout_epoch: 16
+  eval_rollout_epoch: 8
   reward_type: step_level  # step_level or chunk_level
   logprob_type: token_level
   entropy_type: token_level
@@ -119,13 +120,8 @@ actor:
 
   model:
     model_name: "openvla_oft"
-    # lora_path: "${oc.env:REPO_PATH}/logs/base_to_task0_LoRA_grpo/checkpoints/global_step_10/actor/"
-    # lora_path: "${oc.env:REPO_PATH}/logs/task0_to_task1_LoRA_grpo/checkpoints/global_step_10/actor/"
-    # lora_path: "/scratch/cluster/jshim12/RLinf/logs/base_to_task0_LoRA_grpo/checkpoints/global_step_10/actor/"
-    # lora_path: "/scratch/cluster/jshim12/RLinf/logs/task0_to_task1_LoRA_grpo/checkpoints/global_step_10/actor/"
-    # lora_path: "/scratch/cluster/jshim12/RLinf/logs/task1_to_task2_LoRA_grpo/checkpoints/global_step_10/actor/"
-    # lora_path: "/scratch/cluster/jshim12/RLinf/logs/task2_to_task3_LoRA_grpo/checkpoints/global_step_10/actor/"
-    lora_path: "/scratch/cluster/jshim12/RLinf/logs/task3_to_task4_LoRA_grpo/checkpoints/global_step_10/actor/"
+    # lora_path: "${oc.env:REPO_PATH}/logs/best_LoRA/base_to_task2_LoRA_grpo/checkpoints/global_step_10/actor/"
+    lora_path: "${oc.env:REPO_PATH}/logs/best_LoRA/task1_to_task3_LoRA_grpo/checkpoints/global_step_10/actor/"
     value_type: ${algorithm.reward_type}  # 'action' or 'token'
     action_dim: 7
     num_action_chunks: 8

@@ -39,15 +39,23 @@ class EmbodiedEvalRunner:
         self.metric_loger = MetricLogger(cfg)
 
     def evaluate(self):
-        env_futures = self.env.evaluate()
-        rollout_futures = self.rollout.evaluate()
-        env_futures.wait()
-        rollout_results = rollout_futures.wait()
-        eval_metrics_list = [
-            results for results in rollout_results if results is not None
-        ]
-        eval_metrics = compute_evaluate_metrics(eval_metrics_list)
-        return eval_metrics
+        aggregated_eval_metrics = []
+
+        for _ in range(self.cfg.algorithm.eval_rollout_epoch):
+            env_futures = self.env.evaluate()
+            rollout_futures = self.rollout.evaluate()
+            env_futures.wait()
+            rollout_results = rollout_futures.wait()
+            eval_metrics_list = [
+                results for results in rollout_results if results is not None
+            ]
+            eval_metrics = compute_evaluate_metrics(eval_metrics_list)
+
+        final_metrics = {}
+        for k in eval_metrics[0].keys():
+            vals = [m[k] for m in eval_metrics]
+            final_metrics[k] = sum(vals) / len(vals)
+        return final_metrics
 
     def run(self):
         eval_metrics = self.evaluate()
