@@ -43,6 +43,9 @@ from rlinf.utils.placement import HybridComponentPlacement
 from peft import get_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+from rlinf.models import get_model_config_and_processor
+from rlinf.custom.loss import behavior_cloning_loss
+from rlinf.custom.libero_trajectory_dataset import LiberoSFTDataset
 
 class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def __init__(self, cfg: DictConfig):
@@ -76,6 +79,36 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.channel.create_queue(
             cfg.actor.channel.queue_name, maxsize=cfg.actor.channel.queue_size
         )
+
+        # initialize sft buffer
+        self.use_experience_replay = cfg.algorithm.use_experience_replay
+        if self.use_experience_replay:
+            self._init_sft_replay_buffer()
+
+    def _init_sft_replay_buffer(self):
+        dataset_path = os.environ.get("LIBERO_REPO_PATH")
+        if self._rank == 0:
+            print(f"Initializing SFT dataset on rank {self._rank}")
+
+        self.sft_dataset = LiberoSFTDataset(
+            cfg=self.cfg,
+            root_dir=dataset_path, 
+            demos_per_task=1,
+            rank=self._rank,
+            world_size=self._world_size
+        )
+
+        self.sft_dataloader = DataLoader(
+            self.sft_dataset,
+            batch_size=self.cfg.actor.micro_batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False,
+        )
+
+        self.sft_iterator = iter(self.sft_dataloader)
+        if self._rank == 0:
+            print(f"SFT dataset initialized: {len(self.sft_dataset)} samples")
 
     def init_worker(self):
         if not torch.distributed.is_initialized():
@@ -310,6 +343,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch,
             rollout_size // batch_size_per_rank,
         )
+        bc_coeff = self.cfg.actor.get("bc_coeff", 0.0)
 
         metrics = {}
         for _, train_global_batch in tqdm(
@@ -334,6 +368,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             for data_idx, data in enumerate(train_micro_batch):
                 for k, v in data.items():
                     data[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+
+                bc_batch = next(self.sft_iterator)
+                for k, v in bc_batch.items():
+                    bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
                 data = self.model.preprocess_for_train(data)
                 input_ids = data["input_ids"]
@@ -387,14 +425,44 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 }
 
                 kwargs = preprocess_loss_inputs(**kwargs)
-
                 loss, metrics_data = actor_loss(**kwargs)
+
+                if use_experience_replay:
+                    # BC Update
+                    sampling_params = OmegaConf.to_container(
+                        self.cfg.algorithm.sampling_params, resolve=True
+                    )
+                    train_sampling_params = {
+                        "temperature": self._sampling_params["temperature_train"],
+                        "top_k": self._sampling_params["top_k"],
+                        "top_p": self._sampling_params["top_p"],
+                        "max_new_tokens": self._length_params["max_new_token"],
+                        "use_cache": True,
+                    }
+
+                    action, _, _, _ = self.model.predict_action_batch(
+                        input_ids=bc_batch["input_ids"],
+                        attention_mask=bc_batch["attention_mask"],
+                        pixel_values=bc_batch["pixel_values"],
+                        do_sample=not sampling_params["use_greedy"],
+                        **train_sampling_params
+                    )
+
+                    kwargs = {
+                        "action_chunk": action_chunk,
+                        "expert_action_chunk": bc_batch["action_chunks"],
+                        "bc_coeff": bc_coeff
+                    }
+
+                    bc_loss, bc_metrics_data = behavior_cloning_loss(**kwargs)
+                    loss = loss + bc_loss
 
                 loss /= self.gradient_accumulation
                 loss.backward()
 
                 metrics_data["loss"] = loss.detach().item()
                 append_to_dict(metrics, metrics_data)
+                append_to_dict(metrics, bc_metrics_data)
 
             torch.cuda.empty_cache()
 
