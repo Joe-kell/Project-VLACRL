@@ -145,7 +145,7 @@ class Cluster:
             # Default disabling deduplication of logs to ensure all logs are printed.
             ray_logging.RAY_DEDUP_LOGS = 0
         # Ensure Ray uses a user-writable temp directory to avoid /tmp permission issues
-        # self._ensure_ray_tmpdir()
+        self._ensure_ray_tmpdir()
 
         try:
             # First try to connect to an existing Ray cluster
@@ -273,7 +273,7 @@ class Cluster:
 
     def _init_from_existing_managers(self):
         # Ensure Ray uses a user-writable temp directory to avoid /tmp permission issues
-        # self._ensure_ray_tmpdir()
+        self._ensure_ray_tmpdir()
         if not ray.is_initialized():
             try:
                 ray.init(
