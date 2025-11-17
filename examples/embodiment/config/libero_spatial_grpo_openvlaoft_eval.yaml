@@ -21,7 +21,7 @@ runner:
     log_path: "../results"
     project_name: rlinf
     experiment_name: "test_openvla"
-    logger_backends: ["tensorboard"] # wandb, swanlab
+    logger_backends: ["wandb"] # wandb, swanlab
 
   max_epochs: 1000
   max_steps: -1
@@ -45,7 +45,7 @@ algorithm:
   n_eval_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   num_group_envs: 8
   rollout_epoch: 16
-  eval_rollout_epoch: 8
+  eval_rollout_epoch: 2
   reward_type: step_level  # step_level or chunk_level
   logprob_type: token_level
   entropy_type: token_level

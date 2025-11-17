@@ -180,7 +180,6 @@ def bc_custom_forward(
         :,
     ]  # [B, act, vocab_size + 64]
 
-    print(f"model actio dim: {model.action_dim}, num chunks: {model.num_action_chunks}")
     last_hidden_states = last_hidden_states[
         :, -model.action_dim * model.num_action_chunks - 1 : -1
     ]

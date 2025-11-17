@@ -381,6 +381,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     "n_action_bins": self.model.config.n_action_bins,
                 }
 
+                sampling_params = OmegaConf.to_container(
+                    self.cfg.algorithm.sampling_params, resolve=True
+                )
+
                 bc_batch = None
                 if self.use_experience_replay:
                     bc_batch = next(self.sft_iterator)
@@ -388,10 +392,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
                     bc_batch = self.model.preprocess_for_train(bc_batch)
-
-                    sampling_params = OmegaConf.to_container(
-                        self.cfg.algorithm.sampling_params, resolve=True
-                    )
 
                 output_dict, actions = actor_forward(
                     self.model,
