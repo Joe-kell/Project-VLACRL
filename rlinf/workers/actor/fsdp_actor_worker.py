@@ -29,7 +29,7 @@ from rlinf.hybrid_engines.fsdp.fsdp_model_manager import (
     FSDPModelManager,
 )
 from rlinf.models import get_model
-from rlinf.models.embodiment.model_utils import custom_forward
+from rlinf.models.embodiment.model_utils import actor_forward 
 from rlinf.scheduler import Cluster, Worker
 from rlinf.utils.data_iter_utils import get_iterator_k_split
 from rlinf.utils.distributed import all_reduce_dict
@@ -43,6 +43,12 @@ from rlinf.utils.placement import HybridComponentPlacement
 from peft import get_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+from rlinf.models import get_model_config_and_processor
+from rlinf.custom.loss import behavior_cloning_loss
+from rlinf.custom.libero_trajectory_dataset import LiberoSFTDataset
+from torch.utils.data import DataLoader
+from itertools import cycle
+from omegaconf import OmegaConf
 
 class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def __init__(self, cfg: DictConfig):
@@ -76,6 +82,36 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.channel.create_queue(
             cfg.actor.channel.queue_name, maxsize=cfg.actor.channel.queue_size
         )
+
+        # initialize sft buffer
+        self.use_experience_replay = cfg.algorithm.use_experience_replay
+        if self.use_experience_replay:
+            self._init_sft_replay_buffer()
+
+    def _init_sft_replay_buffer(self):
+        dataset_path = os.environ.get("LIBERO_REPO_PATH")
+        if self._rank == 0:
+            print(f"Initializing SFT dataset on rank {self._rank}")
+
+        self.sft_dataset = LiberoSFTDataset(
+            cfg=self.cfg,
+            root_dir=dataset_path, 
+            demos_per_task=1,
+            rank=self._rank,
+            world_size=self._world_size
+        )
+
+        self.sft_dataloader = cycle(DataLoader(
+            self.sft_dataset,
+            batch_size=self.cfg.actor.micro_batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False,
+        ))
+
+        self.sft_iterator = iter(self.sft_dataloader)
+        if self._rank == 0:
+            print(f"SFT dataset initialized: {len(self.sft_dataset)} samples")
 
     def init_worker(self):
         if not torch.distributed.is_initialized():
@@ -310,6 +346,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch,
             rollout_size // batch_size_per_rank,
         )
+        bc_coeff = self.cfg.algorithm.get("bc_coeff", 0.0)
 
         metrics = {}
         for _, train_global_batch in tqdm(
@@ -336,24 +373,30 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     data[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
                 data = self.model.preprocess_for_train(data)
-                input_ids = data["input_ids"]
-                action_tokens = data["action_tokens"]
-                attention_mask = data["attention_mask"]
-                pixel_values = data["pixel_values"]
-
                 action_token_len = self.model.action_dim * self.model.num_action_chunks
 
                 logits_processor_args = {
-                    "action_tokens": action_tokens,
+                    "action_tokens": data["action_tokens"],
                     "vocab_size": self.model.vocab_size,
                     "n_action_bins": self.model.config.n_action_bins,
                 }
 
-                output_dict = custom_forward(
+                sampling_params = OmegaConf.to_container(
+                    self.cfg.algorithm.sampling_params, resolve=True
+                )
+
+                bc_batch = None
+                if self.use_experience_replay:
+                    bc_batch = next(self.sft_iterator)
+                    for k, v in bc_batch.items():
+                        bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+
+                    bc_batch = self.model.preprocess_for_train(bc_batch)
+
+                output_dict, actions = actor_forward(
                     self.model,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
+                    rl_batch=data,
+                    bc_batch=bc_batch,
                     action_token_len=action_token_len,
                     value_model=True
                     if self.cfg.algorithm.adv_type == "embodied_gae"
@@ -362,6 +405,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     temperature=self.cfg.algorithm.sampling_params.temperature_train,
                     top_k=self.cfg.algorithm.sampling_params.top_k,
                     logits_processor_args=logits_processor_args,
+                    do_sample=not sampling_params["use_greedy"],
                 )
 
                 kwargs = {
@@ -387,13 +431,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 }
 
                 kwargs = preprocess_loss_inputs(**kwargs)
+                rl_loss, metrics_data = actor_loss(**kwargs)
 
-                loss, metrics_data = actor_loss(**kwargs)
+                bc_loss, bc_metrics_data = 0.0, {}
+                if self.use_experience_replay:
+                    kwargs = {
+                        "action_tokens": torch.from_numpy(actions).to(f"cuda:{int(os.environ['LOCAL_RANK'])}"),
+                        "expert_action_tokens": bc_batch["action_tokens"],
+                        "bc_coeff": bc_coeff
+                    }
+
+                    bc_loss, bc_metrics_data = behavior_cloning_loss(**kwargs)
+
+                loss = rl_loss + bc_loss
 
                 loss /= self.gradient_accumulation
                 loss.backward()
 
-                metrics_data["loss"] = loss.detach().item()
+                metrics_data["rl/loss"] = rl_loss.detach().item()
+                metrics_data.update(bc_metrics_data)
+                metrics_data["total/loss"] = loss.detach().item()
                 append_to_dict(metrics, metrics_data)
 
             torch.cuda.empty_cache()

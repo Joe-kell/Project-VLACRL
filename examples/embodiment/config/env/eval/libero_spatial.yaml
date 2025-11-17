@@ -19,7 +19,7 @@ num_envs: ${env.eval.num_envs}  # Override in main config via env.eval.num_envs
 eval_per_task: ${env.eval.eval_per_task}  # Override in main config (documentation: expected evaluations per task)
 
 video_cfg:
-  save_video: True
+  save_video: False
   info_on_video: True
   video_base_dir: ${runner.logger.log_path}/video/train
 

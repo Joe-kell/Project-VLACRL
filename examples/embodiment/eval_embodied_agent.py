@@ -19,6 +19,7 @@ from rlinf.config import validate_cfg
 from rlinf.runners.embodied_eval_runner import EmbodiedEvalRunner
 from rlinf.scheduler import Cluster
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
 from rlinf.workers.env.env_worker import EnvWorker
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 
@@ -61,7 +62,10 @@ def main(cfg) -> None:
         env=env_group,
     )
 
+    import time
+    s = time.time()
     runner.run()
+    print("Eval time:", time.time() - s)
 
 
 if __name__ == "__main__":

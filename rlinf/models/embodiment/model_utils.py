@@ -17,6 +17,7 @@ from typing import Any, Optional
 import torch
 import torch.nn.functional as F
 from transformers.generation import TopKLogitsWarper
+import numpy as np
 
 
 # def default_logits_processor(logits, action_tokens, vocab_size, n_action_bins):
@@ -100,6 +101,144 @@ def compute_entropy_from_logits(logits, epsilon=1e-10):
     entropy = -torch.sum(all_probs * all_log_probs, dim=1)  # [B, seq-len]
     return entropy
 
+def actor_forward(
+    model,
+    rl_batch,
+    bc_batch=None,
+    output_hidden_states=True,
+    action_token_len=None,
+    value_model=False,
+    value_head_mode: str = "a",
+    logits_processor=default_logits_processor,
+    temperature: int = 1.0,
+    top_k: int = -1,
+    logits_processor_args: Optional[dict] = None,
+    do_sample=False,
+):
+    actions = None
+    if bc_batch:
+        # RL + BC forward
+        actions = bc_custom_forward(
+            model,
+            input_ids=bc_batch["input_ids"],
+            attention_mask=bc_batch["attention_mask"],
+            pixel_values=bc_batch["pixel_values"],
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=do_sample
+        )
+
+    # RL-only forward
+    output_dict = custom_forward(
+        model,
+        input_ids=rl_batch["input_ids"],
+        attention_mask=rl_batch["attention_mask"],
+        pixel_values=rl_batch["pixel_values"],
+        output_hidden_states=output_hidden_states,
+        action_token_len=action_token_len,
+        value_model=value_model,
+        value_head_mode=value_head_mode,
+        temperature=temperature,
+        top_k=top_k,
+        logits_processor=logits_processor,
+        logits_processor_args=logits_processor_args
+    )
+    return output_dict, actions
+
+def bc_custom_forward(
+    model,
+    input_ids,
+    attention_mask,
+    pixel_values,
+    temperature=0.1,
+    top_k=50,
+    do_sample=False,
+):
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        pixel_values=pixel_values,
+        output_hidden_states=True,
+    )
+
+    n_prompt_tokens = input_ids.shape[-1] - 1
+    # Calculate number of patches (including proprio token and/or diffusion timestep embedding if present)
+    n_patches = (
+        model.vision_backbone.get_num_patches()
+        * model.vision_backbone.get_num_images_in_input()
+    )
+
+    # Extract hidden states for action tokens
+    last_hidden_states = outputs.hidden_states[-1]  # (B, seq_len, D)
+    # assert last_hidden_states.shape[1] == mm_embeddings.shape[1]
+
+    logits_tensor = outputs.logits[
+        :,
+        n_patches + n_prompt_tokens : n_patches
+        + n_prompt_tokens
+        + model.action_dim * model.num_action_chunks,
+        :,
+    ]  # [B, act, vocab_size + 64]
+
+    last_hidden_states = last_hidden_states[
+        :, -model.action_dim * model.num_action_chunks - 1 : -1
+    ]
+
+    logits_tensor[..., : model.vocab_size - model.config.n_action_bins] = -torch.inf
+    logits_tensor[..., model.vocab_size :] = -torch.inf
+
+    processed_logits_tensor = logits_tensor / temperature 
+    top_k = min(
+        top_k, processed_logits_tensor.size(-1)
+    )  # Safety check
+    if top_k > 0:
+        logits_warper = TopKLogitsWarper(
+            top_k
+        )  # since here is logprob instead of logits, we use 0 instead of -inf
+        processed_logits_tensor = logits_warper(None, processed_logits_tensor)
+
+    processed_logprob_tensor = F.log_softmax(
+        processed_logits_tensor, dim=-1
+    )  # [B, act, vocab_size + 64]
+
+    if do_sample:
+        probs_tensor = torch.exp(
+            processed_logprob_tensor
+        )  # [B, act, vocab_size + 64]
+        probs_flat = probs_tensor.view(
+            -1, processed_logprob_tensor.shape[-1]
+        )  # [B * act, vocab_size + 64]
+
+        sample_flat = torch.multinomial(
+            probs_flat, num_samples=1, replacement=True
+        )  # [B * act, 1]
+        idxs = sample_flat.view(
+            processed_logprob_tensor.shape[0], processed_logprob_tensor.shape[1]
+        )  # [B, act]
+    else:
+        idxs = processed_logprob_tensor.argmax(dim=-1)  # [B, act]
+
+    assert torch.all(
+        idxs >= model.vocab_size - model.config.n_action_bins
+    ) and torch.all(idxs < model.vocab_size)
+
+    chunk_action_tokens = idxs.reshape(-1, model.action_dim)
+    predicted_action_token_ids = chunk_action_tokens.cpu().numpy()
+    discretized_actions = model.vocab_size - predicted_action_token_ids
+    discretized_actions = np.clip(
+        discretized_actions - 1, a_min=0, a_max=model.bin_centers.shape[0] - 1
+    )
+    # normalized_actions = model.bin_centers[discretized_actions]
+    normalized_actions = np.asarray(
+        [model.bin_centers[da] for da in discretized_actions]
+    )  # [B, dim]
+    normalized_actions = normalized_actions.reshape(-1, model.action_dim)
+
+    # Unnormalize predicted actions
+    actions = model._unnormalize_actions(normalized_actions, model.unnorm_key)
+    actions = actions.reshape(idxs.shape)
+
+    return actions
 
 def custom_forward(
     model,
@@ -150,7 +289,6 @@ def custom_forward(
         output_dict.update({"values": values})
 
     return output_dict
-
 
 def prepare_observations_for_vla(
     simulator_type: str,
