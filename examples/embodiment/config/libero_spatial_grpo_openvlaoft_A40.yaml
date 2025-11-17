@@ -16,6 +16,7 @@ cluster:
     env: 0
     rollout: 1-2
     actor: 2-3
+  ray_object_store_memory: 461708984320  # Ray object store memory in bytes (~200GB)
 
 runner:
   task_type: embodied

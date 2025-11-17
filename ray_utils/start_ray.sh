@@ -20,13 +20,19 @@ fi
 mkdir -p "$RAY_TMPDIR"
 export TMPDIR="$RAY_TMPDIR"
 
+# Ray object store memory (bytes)
+# Can be set via config -> exported as RAY_OBJECT_STORE_MEMORY env var
+# Default: 461708984320 (~430GB) for backward compatibility
+RAY_MEMORY="${RAY_OBJECT_STORE_MEMORY:-461708984320}"
+
 # Head node startup logic
 if [ "$RANK" -eq 0 ]; then
     # Get local machine IP address (assumed to be intranet IP)
     IP_ADDRESS=$(hostname -I | awk '{print $1}')
     # Start Ray head node
     echo "Starting Ray head node on rank 0, IP: $IP_ADDRESS"
-    ray start --head --memory=461708984320 --port=29500 --temp-dir="$RAY_TMPDIR"
+    echo "Ray object store memory: $RAY_MEMORY bytes"
+    ray start --head --memory=$RAY_MEMORY --port=29500 --temp-dir="$RAY_TMPDIR"
     
     # Write IP to file
     echo "$IP_ADDRESS" > $RAY_HEAD_IP_FILE
@@ -52,5 +58,6 @@ else
     fi
     
     echo "Starting Ray worker node connecting to head at $HEAD_ADDRESS"
-    ray start --memory=461708984320 --address="$HEAD_ADDRESS:29500" --temp-dir="$RAY_TMPDIR"
+    echo "Ray object store memory: $RAY_MEMORY bytes"
+    ray start --memory=$RAY_MEMORY --address="$HEAD_ADDRESS:29500" --temp-dir="$RAY_TMPDIR"
 fi

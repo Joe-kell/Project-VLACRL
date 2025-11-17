@@ -14,6 +14,7 @@ cluster:
   num_nodes: 1
   component_placement:
     actor,env,rollout: all
+  ray_object_store_memory: 461708984320  # Ray object store memory in bytes (~200GB, lower than training)
 
 runner:
   task_type: embodied
@@ -90,6 +91,9 @@ env:
     queue_size: 0
   enable_offload: False
   fixed_task_ids: null
+  eval:
+    num_envs: 200  # Number of parallel evaluation environments (default: 200)
+    eval_per_task: 20  # Expected evaluations per task (for 10 tasks: num_envs // 10)
 
 rollout:
   group_name: "RolloutGroup"

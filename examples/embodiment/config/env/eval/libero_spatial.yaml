@@ -15,8 +15,8 @@ group_size: 1
 use_fixed_reset_state_ids: True
 num_images_in_input: 1
 
-num_envs: 200
-eval_per_task: 20
+num_envs: ${env.eval.num_envs}  # Override in main config via env.eval.num_envs
+eval_per_task: ${env.eval.eval_per_task}  # Override in main config (documentation: expected evaluations per task)
 
 video_cfg:
   save_video: True

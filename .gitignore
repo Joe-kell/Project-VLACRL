@@ -16,3 +16,5 @@ logs/*
 uv.lock
 model/
 openvla_image.tar
+*.err
+.ray_tmp*

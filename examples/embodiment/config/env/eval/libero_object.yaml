@@ -15,7 +15,7 @@ group_size: 1
 use_fixed_reset_state_ids: True
 num_images_in_input: 1
 
-num_envs: 500
+num_envs: ${env.eval.num_envs}  # Can be overridden in main config (default: 500)
 
 video_cfg:
   save_video: True

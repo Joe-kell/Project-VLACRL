@@ -102,6 +102,7 @@ class LiberoEnv(gym.Env):
         if env_idx is None:
             env_idx = np.arange(self.cfg.num_envs)
         for env_id in range(self.cfg.num_envs):
+            print(f"env_id: {env_id}, env_idx: {env_idx}, total_num_envs: {self.cfg.num_envs}")
             if env_id not in env_idx:
                 task_descriptions.append(self.task_descriptions[env_id])
                 continue
@@ -181,7 +182,7 @@ class LiberoEnv(gym.Env):
             states_per_task_per_gpu = states_per_task_total // self.world_size
             
             if states_per_task_total % self.world_size != 0:
-                print(
+                raise ValueError(
                     f"WARNING [Rank {self.rank}]: states_per_task ({states_per_task_total}) not divisible by world_size ({self.world_size}). "
                     f"Some GPUs may have slightly different numbers of states per task."
                 )

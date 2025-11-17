@@ -32,6 +32,12 @@ mp.set_start_method("spawn", force=True)
 def main(cfg) -> None:
     cfg = validate_cfg(cfg)
 
+    # Export Ray object store memory from config to environment variable
+    # This allows start_ray.sh to use the configured value
+    import os
+    ray_memory = cfg.cluster.get("ray_object_store_memory", 461708984320)
+    os.environ["RAY_OBJECT_STORE_MEMORY"] = str(ray_memory)
+
     cluster = Cluster(num_nodes=cfg.cluster.num_nodes)
     component_placement = HybridComponentPlacement(cfg, cluster)
 
