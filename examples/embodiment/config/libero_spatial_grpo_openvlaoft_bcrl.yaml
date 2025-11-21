@@ -23,12 +23,12 @@ runner:
     experiment_name: "test_openvla"
     logger_backends: ["wandb"] # wandb, swanlab
 
-  max_epochs: 1000
+  max_epochs: 10
   max_steps: -1
 
   only_eval: False
   val_check_interval: -1
-  save_interval: 5
+  save_interval: 10
   seq_length: 4096
   max_prompt_length: 128
 
@@ -93,7 +93,7 @@ env:
   enable_offload: False
   eval:
     num_envs: 120
-    eval_per_task: ${oc.eval:"${env.eval.num_envs} // 10"}
+    eval_per_task: ${int_div:${env.eval.num_envs}, 10}
   fixed_task_ids: [0]
 
 rollout:
