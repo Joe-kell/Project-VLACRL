@@ -14,11 +14,10 @@
 
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers.generation import TopKLogitsWarper
-import numpy as np
-
 
 # def default_logits_processor(logits, action_tokens, vocab_size, n_action_bins):
 #     logits = logits.permute(0, 2, 1)  # [B, vocab-size, action-dim]
@@ -34,47 +33,52 @@ import numpy as np
 
 #     return ret
 
+
 def default_logits_processor(logits, action_tokens, vocab_size, n_action_bins):
     logits = logits.permute(0, 2, 1)  # [B, vocab-size, action-dim]
-    
+
     # Define valid action token range
     valid_start = vocab_size - n_action_bins
     valid_end = vocab_size
-    
+
     # VALIDATION: Check if action_tokens are in valid range
     out_of_bounds = (action_tokens < valid_start) | (action_tokens >= valid_end)
     if out_of_bounds.any():
-        print(f"⚠️ WARNING: {out_of_bounds.sum()}/{action_tokens.numel()} action tokens out of bounds!")
+        print(
+            f"⚠️ WARNING: {out_of_bounds.sum()}/{action_tokens.numel()} action tokens out of bounds!"
+        )
         print(f"  Valid range: [{valid_start}, {valid_end})")
         print(f"  action_tokens range: [{action_tokens.min()}, {action_tokens.max()}]")
         print(f"  Out of bounds indices: {torch.where(out_of_bounds)}")
-        
+
         # Show specific problematic values
         bad_tokens = action_tokens[out_of_bounds]
         print(f"  Bad token values: {bad_tokens[:10]}")  # Show first 10
-    
+
     # Apply masking
     logits[:, :valid_start] = -torch.inf
     logits[:, valid_end:] = -torch.inf
-    
+
     # VALIDATION: Check if valid region has at least some finite values
     valid_region = logits[:, valid_start:valid_end, :]
     all_inf_mask = torch.isinf(valid_region).all(dim=1)  # Check per [B, action-dim]
     if all_inf_mask.any():
-        print(f"⚠️ WARNING: {all_inf_mask.sum()} positions have all -inf in valid region!")
+        print(
+            f"⚠️ WARNING: {all_inf_mask.sum()} positions have all -inf in valid region!"
+        )
         print(f"  This will cause NaN in softmax")
-    
+
     logprobs = compute_logprobs_from_logits(logits=logits, target=action_tokens)
-    
+
     # VALIDATION: Check for NaNs in output
     if torch.isnan(logprobs).any():
         print(f"⚠️ NaN detected in logprobs!")
         nan_mask = torch.isnan(logprobs)
         print(f"  Number of NaNs: {nan_mask.sum()}/{logprobs.numel()}")
-        
+
         # Check corresponding action tokens
         print(f"  Action tokens at NaN positions: {action_tokens[nan_mask][:10]}")
-    
+
     entropy = compute_entropy_from_logits(logits)
     ret = {"logprobs": logprobs, "entropy": entropy}
     return ret
@@ -101,6 +105,7 @@ def compute_entropy_from_logits(logits, epsilon=1e-10):
     entropy = -torch.sum(all_probs * all_log_probs, dim=1)  # [B, seq-len]
     return entropy
 
+
 def actor_forward(
     model,
     rl_batch,
@@ -115,23 +120,25 @@ def actor_forward(
     logits_processor_args: Optional[dict] = None,
     do_sample=False,
     return_bc_logits=False,
+    logits_type="processed",
 ):
     """Forward pass for actor model with optional BC batch.
-    
+
     Args:
         model: The model to use
         rl_batch: RL training batch
         bc_batch: Optional BC batch for experience replay
         return_bc_logits: If True, return logits from BC forward pass
         ... (other args same as before)
-    
+
     Returns:
         output_dict: Dictionary with logprobs, entropy, values, etc.
         actions: Actions from BC forward (numpy array) or None
         bc_logits: Optional logits from BC forward (if return_bc_logits=True)
     """
     actions = None
-    bc_logits = None
+    raw_bc_logits = None
+    processed_bc_logits = None
     if bc_batch:
         # RL + BC forward
         result = bc_custom_forward(
@@ -143,9 +150,13 @@ def actor_forward(
             top_k=top_k,
             do_sample=do_sample,
             return_logits=return_bc_logits,
+            logits_type=logits_type,
         )
         if return_bc_logits:
-            actions, bc_logits = result
+            if logits_type == "processed":
+                actions, processed_bc_logits = result
+            elif logits_type == "raw":
+                actions, raw_bc_logits = result
         else:
             actions = result
 
@@ -162,13 +173,17 @@ def actor_forward(
         temperature=temperature,
         top_k=top_k,
         logits_processor=logits_processor,
-        logits_processor_args=logits_processor_args
+        logits_processor_args=logits_processor_args,
     )
-    
+
     if return_bc_logits:
-        return output_dict, actions, bc_logits
+        if logits_type == "processed":
+            return output_dict, actions, processed_bc_logits
+        elif logits_type == "raw":
+            return output_dict, actions, raw_bc_logits
     else:
         return output_dict, actions
+
 
 def bc_custom_forward(
     model,
@@ -179,9 +194,10 @@ def bc_custom_forward(
     top_k=50,
     do_sample=False,
     return_logits=False,
+    logits_type="processed",
 ):
     """Forward pass for behavior cloning batch.
-    
+
     Args:
         model: The model to use for forward pass
         input_ids: Input token IDs
@@ -191,7 +207,7 @@ def bc_custom_forward(
         top_k: Top-k filtering
         do_sample: Whether to sample or use argmax
         return_logits: If True, return raw logits in addition to actions
-    
+
     Returns:
         If return_logits=False: actions (numpy array)
         If return_logits=True: (actions, logits) tuple where logits are raw logits before temperature/top-k
@@ -232,10 +248,8 @@ def bc_custom_forward(
     logits_tensor[..., : model.vocab_size - model.config.n_action_bins] = -torch.inf
     logits_tensor[..., model.vocab_size :] = -torch.inf
 
-    processed_logits_tensor = logits_tensor / temperature 
-    top_k = min(
-        top_k, processed_logits_tensor.size(-1)
-    )  # Safety check
+    processed_logits_tensor = logits_tensor / temperature
+    top_k = min(top_k, processed_logits_tensor.size(-1))  # Safety check
     if top_k > 0:
         logits_warper = TopKLogitsWarper(
             top_k
@@ -247,9 +261,7 @@ def bc_custom_forward(
     )  # [B, act, vocab_size + 64]
 
     if do_sample:
-        probs_tensor = torch.exp(
-            processed_logprob_tensor
-        )  # [B, act, vocab_size + 64]
+        probs_tensor = torch.exp(processed_logprob_tensor)  # [B, act, vocab_size + 64]
         probs_flat = probs_tensor.view(
             -1, processed_logprob_tensor.shape[-1]
         )  # [B * act, vocab_size + 64]
@@ -287,9 +299,13 @@ def bc_custom_forward(
         # valid_start = model.vocab_size - model.config.n_action_bins
         # valid_end = model.vocab_size
         # raw_logits_valid = raw_logits[..., valid_start:valid_end]  # [B, act, n_action_bins]
-        return actions, raw_logits # raw_logits_valid
+        if logits_type == "processed":
+            return actions, processed_logits_tensor
+        elif logits_type == "raw":
+            return actions, raw_logits  # raw_logits_valid
     else:
         return actions
+
 
 def custom_forward(
     model,
@@ -340,6 +356,7 @@ def custom_forward(
         output_dict.update({"values": values})
 
     return output_dict
+
 
 def prepare_observations_for_vla(
     simulator_type: str,

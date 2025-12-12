@@ -12,10 +12,19 @@ from rlinf.models.embodiment.model_utils import prepare_observations
 
 
 class LiberoSFTDataset(Dataset):
-    def __init__(self, cfg, root_dir, demos_per_task=1, rank=0, world_size=1):
+    def __init__(
+        self,
+        cfg,
+        root_dir,
+        demos_per_task=1,
+        rank=0,
+        world_size=1,
+        use_cached_logits=False,
+    ):
         self.cfg = cfg
         task_suite_name = cfg.env.train.task_suite_name
-        self.root_dir = os.path.join(root_dir, "libero", "datasets", task_suite_name)
+        dataset_dir = "datasets" if not use_cached_logits else "datasets_with_logits"
+        self.root_dir = os.path.join(root_dir, "libero", dataset_dir, task_suite_name)
         self.task_files = [
             os.path.join(self.root_dir, f)
             for f in os.listdir(self.root_dir)
@@ -35,10 +44,10 @@ class LiberoSFTDataset(Dataset):
                 demo_names = sorted(list(f["data"].keys()))[:demos_per_task]
                 for name in demo_names:
                     traj_len = len(f["data"][name]["actions"])
-                    self.trajectories.append((path, name, traj_len))
+                    self.trajectories.append((path, name, traj_len, task_desc))
 
         self.sample_indices = []
-        for path, demo_name, traj_len in self.trajectories:
+        for path, demo_name, traj_len, task_desc in self.trajectories:
             valid_len = traj_len - self.num_action_chunks + 1
 
             if valid_len > 0:
@@ -65,6 +74,15 @@ class LiberoSFTDataset(Dataset):
                 demo["actions"][timestep : timestep + self.num_action_chunks]
             )
 
+            raw_action_logits = None
+            processed_action_logits = None
+            if "raw_action_logits" in demo.keys():
+                raw_action_logits = np.array(demo["raw_action_logits"][timestep])
+            if "processed_action_logits" in demo.keys():
+                processed_action_logits = np.array(
+                    demo["processed_action_logits"][timestep]
+                )
+
         assert actions.shape[0] == self.num_action_chunks, (
             f"Expected {self.num_action_chunks} actions, got {actions.shape[0]}"
         )
@@ -85,13 +103,23 @@ class LiberoSFTDataset(Dataset):
         )
         processed_obs = {k: v.squeeze(0) for k, v in processed_obs.items()}
         action_chunks = torch.from_numpy(actions).float()
-        return {**processed_obs, "action_tokens": action_chunks}
+        output = {
+            **processed_obs,
+            "action_tokens": action_chunks,
+        }
+
+        if raw_action_logits is not None:
+            output["raw_action_logits"] = raw_action_logits
+        if processed_action_logits is not None:
+            output["processed_action_logits"] = processed_action_logits
+
+        return output
 
 
 @hydra.main(
     version_base="1.1",
     config_path="../../examples/embodiment/config",
-    config_name="libero_spatial_grpo_openvlaoft",
+    config_name="libero_spatial_grpo_openvlaoft_bcrl_logit",
 )
 def main(cfg):
     from omegaconf import OmegaConf
@@ -102,7 +130,12 @@ def main(cfg):
     REPO_PATH = os.path.dirname(os.path.dirname(EMBODIED_PATH))
     LIBERO_REPO_PATH = os.path.join(REPO_PATH, "LIBERO")
     sft_dataset = LiberoSFTDataset(
-        cfg=cfg, root_dir=LIBERO_REPO_PATH, demos_per_task=1, rank=0, world_size=4
+        cfg=cfg,
+        root_dir=LIBERO_REPO_PATH,
+        demos_per_task=1,
+        rank=0,
+        world_size=4,
+        use_cached_logits=True,
     )
 
     sft_dataloader = DataLoader(
@@ -116,6 +149,8 @@ def main(cfg):
     sft_iterator = iter(sft_dataloader)
     batch = next(iter(sft_iterator))
 
+    for key in batch:
+        print(f"{key} : {batch[key].shape}")
     # obs, action = batch["obs"], batch["action"]
     # print(f"obs shape: {obs.shape}, action shape: {action.shape}")
 

@@ -88,8 +88,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         # initialize sft buffer
         self.use_experience_replay = cfg.algorithm.use_experience_replay
+        self.use_cached_bc_logits = cfg.algorithm.get("use_cached_bc_logits", False)
+        self.logits_type = cfg.algorithm.get("logits_type", "processed")
+        if self.logits_type not in ["processed", "raw"]:
+            raise NotImplementedError(
+                f"returning logits type {self.logits_type} is not implemented"
+            )
+
         if self.use_experience_replay:
-            self._init_sft_replay_buffer()
+            self._init_sft_replay_buffer(use_cached_logits=self.use_cached_bc_logits)
 
         # Track training step for logit comparison checks
         self.training_step_count = 0
@@ -102,7 +109,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         # if not self.enable_logit_check:
         #     exit()
 
-    def _init_sft_replay_buffer(self):
+    def _init_sft_replay_buffer(self, use_cached_logits=False):
         dataset_path = os.environ.get("LIBERO_REPO_PATH")
         if self._rank == 0:
             print(f"Initializing SFT dataset on rank {self._rank}")
@@ -113,6 +120,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             demos_per_task=1,
             rank=self._rank,
             world_size=self._world_size,
+            use_cached_logits=use_cached_logits,
         )
 
         self.sft_dataloader = cycle(
@@ -144,7 +152,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         # Store reference model state dict if using reference logits BC loss
         self.ref_policy_state_dict = None
         use_ref_logits_bc = self.cfg.algorithm.get("use_reference_logits_bc", False)
-        if use_ref_logits_bc and self.use_experience_replay:
+        if (
+            use_ref_logits_bc
+            and self.use_experience_replay
+            and not self.use_cached_bc_logits
+        ):
             # Check if we should load from a checkpoint path
             reference_model_path = self.cfg.actor.get("reference_model_path", None)
 
@@ -487,6 +499,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     logits_processor_args=logits_processor_args,
                     do_sample=not sampling_params["use_greedy"],
                     return_bc_logits=return_bc_logits,
+                    logits_type=self.logits_type,
                 )
 
                 if return_bc_logits:
@@ -522,9 +535,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 bc_loss, bc_metrics_data = 0.0, {}
                 if self.use_experience_replay:
                     if use_ref_logits_bc:
-                        reference_bc_logits = self._compute_reference_bc_logits(
-                            bc_batch
-                        )
+                        if self.use_cached_bc_logits:
+                            if self.logits_type == "processed":
+                                reference_bc_logits = bc_batch[
+                                    "processed_action_logits"
+                                ]
+                            elif self.logits_type == "raw":
+                                reference_bc_logits = bc_batch["raw_action_logits"]
+                        else:
+                            reference_bc_logits = self._compute_reference_bc_logits(
+                                bc_batch
+                            )
 
                         if self.enable_logit_check:
                             logit_diff = (current_bc_logits - reference_bc_logits).abs()

@@ -10,6 +10,7 @@ from tqdm import tqdm
 from rlinf.config import torch_dtype_from_precision
 from rlinf.models import get_model, get_model_config_and_processor
 from rlinf.models.embodiment.model_utils import (
+    bc_custom_forward,
     default_logits_processor,
     prepare_observations,
 )
@@ -89,32 +90,21 @@ class LogitsPrecomputeWorker(Worker):
 
     def compute_logits(self, processed_obs):
         """Run forward pass and return logits."""
-        action_token_len = self.hf_model.action_dim * self.hf_model.num_action_chunks
 
         with torch.no_grad():
-            actions, action_tokens, action_logits, last_hidden_state = (
-                self.hf_model.predict_action_batch(
-                    input_ids=processed_obs["input_ids"],
-                    attention_mask=processed_obs["attention_mask"],
-                    pixel_values=processed_obs["pixel_values"],
-                    do_sample=False,
-                    max_new_tokens=action_token_len,
-                    use_cache=True,
-                )
+            actions, raw_logits, processed_logits_tensor = bc_custom_forward(
+                model=self.hf_model,
+                input_ids=processed_obs["input_ids"],
+                attention_mask=processed_obs["attention_mask"],
+                pixel_values=processed_obs["pixel_values"],
+                do_sample=False,
+                return_logits=True,
+                logits_type="all",
             )
 
-            # Process logits
-            chunk_logprobs = default_logits_processor(
-                action_logits,
-                action_tokens,
-                self.hf_model.vocab_size,
-                self.hf_model.config.n_action_bins,
-            )["logprobs"]
-
         return {
-            "action_logits": action_logits.cpu().numpy(),
-            "action_tokens": action_tokens.cpu().numpy(),
-            "logprobs": chunk_logprobs.cpu().numpy(),
+            "raw_action_logits": raw_logits.cpu().numpy(),
+            "processed_action_logits": processed_logits_tensor.cpu().numpy(),
             "actions": actions,
         }
 
@@ -159,9 +149,8 @@ class LogitsPrecomputeWorker(Worker):
                     # Compute and save logits for each timestep
                     traj_len = len(demo_in["actions"])
 
-                    all_action_logits = []
-                    all_action_tokens = []
-                    all_logprobs = []
+                    all_raw_action_logits = []
+                    all_processed_action_logits = []
                     all_predicted_actions = []
 
                     for t in range(traj_len):
@@ -189,19 +178,19 @@ class LogitsPrecomputeWorker(Worker):
 
                         logits_dict = self.compute_logits(processed_obs)
 
-                        all_action_logits.append(logits_dict["action_logits"])
-                        all_action_tokens.append(logits_dict["action_tokens"])
-                        all_logprobs.append(logits_dict["logprobs"])
+                        all_raw_action_logits.append(logits_dict["raw_action_logits"])
+                        all_processed_action_logits.append(
+                            logits_dict["processed_action_logits"]
+                        )
                         all_predicted_actions.append(logits_dict["actions"])
 
                     demo_out.create_dataset(
-                        "action_logits", data=np.concatenate(all_action_logits, axis=0)
+                        "raw_action_logits",
+                        data=np.concatenate(all_raw_action_logits, axis=0),
                     )
                     demo_out.create_dataset(
-                        "action_tokens", data=np.concatenate(all_action_tokens, axis=0)
-                    )
-                    demo_out.create_dataset(
-                        "logprobs", data=np.concatenate(all_logprobs, axis=0)
+                        "processed_action_logits",
+                        data=np.concatenate(all_processed_action_logits, axis=0),
                     )
                     demo_out.create_dataset(
                         "predicted_actions",
