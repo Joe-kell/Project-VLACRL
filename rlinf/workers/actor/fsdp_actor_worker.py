@@ -98,6 +98,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.use_experience_replay:
             self._init_sft_replay_buffer(use_cached_logits=self.use_cached_bc_logits)
 
+        self._preallocated_memory = None
+
         # Track training step for logit comparison checks
         self.training_step_count = 0
         # Enable logit comparison check (for testing).
@@ -178,6 +180,49 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             torch.cuda.synchronize()
             gc.collect()
             torch.cuda.empty_cache()
+
+    def preallocate_memory(self):
+        """Preallocate GPU memory to prevent OOM during rollout."""
+        preallocate_gb = self.cfg.actor.get("preallocate", 0)
+        if preallocate_gb == 0:
+            return
+        # Convert GB to bytes
+        size_bytes = int(float(preallocate_gb) * 1024 * 1024 * 1024)
+        bytes_per_float32 = 4
+        num_elements = size_bytes // bytes_per_float32
+        if self._rank == 0:
+            print(
+                f"[INFO] Preallocating {preallocate_gb} GB of GPU memory on each actor worker..."
+            )
+        try:
+            self._preallocated_memory = torch.empty(
+                num_elements, dtype=torch.float32, device=self.device
+            )
+            torch.cuda.synchronize()
+            if self._rank == 0:
+                print(
+                    f"[INFO] Successfully preallocated {preallocate_gb} GB on GPU {self.device}"
+                )
+        except RuntimeError as e:
+            if self._rank == 0:
+                print(f"[ERROR] Failed to preallocate memory: {e}")
+            raise
+
+    def _deallocate_preallocated_memory(self):
+        """Deallocate preallocated memory before training."""
+        if self._preallocated_memory is not None:
+            if self._rank == 0:
+                size_gb = self._preallocated_memory.numel() * 4 / (1024**3)
+                print(f"[INFO] Deallocating {size_gb:.2f} GB of preallocated memory...")
+            del self._preallocated_memory
+            self._preallocated_memory = None
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            if self._rank == 0:
+                print("[INFO] Preallocated memory deallocated")
+        else:
+            if self._rank == 0:
+                print("[WARNING] No memory has been preallocated. Nothing to free.")
 
     def model_provider_func(self):
         model = get_model(self.cfg.actor.checkpoint_load_path, self.cfg.actor.model)
@@ -389,6 +434,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         return reference_bc_logits
 
     def run_training(self):
+        self._deallocate_preallocated_memory()
+
         if self.cfg.actor.get("enable_offload", False):
             self.load_fsdp_param_and_grad(self.device)
             self.load_fsdp_optimizer(self.device)
