@@ -57,6 +57,55 @@ def compute_entropy_from_logits(logits, epsilon=1e-10):
     return entropy
 
 
+def compute_action_tokens_from_actions(model, actions):
+    """
+    Inverse of the action tokens to continuous actions
+
+
+    chunk_action_tokens = idxs.reshape(-1, model.action_dim)
+    predicted_action_token_ids = chunk_action_tokens.cpu().numpy()
+    discretized_actions = model.vocab_size - predicted_action_token_ids
+    discretized_actions = np.clip(
+        discretized_actions - 1, a_min=0, a_max=model.bin_centers.shape[0] - 1
+    )
+    # normalized_actions = model.bin_centers[discretized_actions]
+    normalized_actions = np.asarray(
+        [model.bin_centers[da] for da in discretized_actions]
+    )  # [B, dim]
+    normalized_actions = normalized_actions.reshape(-1, model.action_dim)
+
+    # Unnormalize predicted actions
+    actions = model._unnormalize_actions(normalized_actions, model.unnorm_key)
+    actions = actions.reshape(idxs.shape)
+    """
+
+    B, T, D = actions.shape
+    assert D == model.action_dim
+
+    normalized_actions = model._normalize_actions(actions, model.unnorm_key)
+    normalized_actions = normalized_actions.reshape(-1, D)
+    bin_centers = model.bin_centers
+
+    discretized_actions = []
+    for dim in range(D):
+        vals = normalized_actions[:, dim][:, None]  # (B*T, 1)
+        dists = np.abs(vals - bin_centers[None, :])  # (B*T, n_bins)
+        nearest_bins = np.argmin(dists, axis=1)  # (B*T,)
+        discretized_actions.append(nearest_bins)
+
+    discretized_actions = np.stack(discretized_actions, axis=1)  # (B*T, D)
+
+    token_ids = model.vocab_size - 1 - discretized_actions
+    token_ids = np.clip(
+        token_ids,
+        model.vocab_size - model.config.n_action_bins,
+        model.vocab_size - 1,
+    )
+
+    token_ids = token_ids.reshape(B, T * D)
+    return token_ids
+
+
 def actor_forward(
     model,
     rl_batch,
@@ -69,7 +118,7 @@ def actor_forward(
     temperature: int = 1.0,
     top_k: int = -1,
     logits_processor_args: Optional[dict] = None,
-    do_sample=False,
+    do_sample=False,  # unused
     return_bc_logits=False,
     logits_type="processed",
 ):
@@ -85,6 +134,7 @@ def actor_forward(
         actions: Actions from BC forward (numpy array) or None
         bc_logits: Optional logits from BC forward (if return_bc_logits=True)
     """
+    assert rl_batch.shape[0] == bc_batch.shape[0]
     has_bc_batch = bc_batch is not None
     if has_bc_batch:
         batch = {}
@@ -114,10 +164,10 @@ def actor_forward(
         rl_output_dict = {}
         for key, value in output_dict.items():
             rl_output_dict[key] = value[:bs]
-        processed_bc_logits = output_dict["processed_logits"][bs:]
-        processed_bc_logits
-
         raw_bc_logits = output_dict["raw_logits"][bs:]
+        processed_bc_logits = output_dict["processed_logits"][bs:]
+
+        rl_output_dict["intermediate_logits"] = output_dict["intermediate_logits"][bs:]
         output_dict = rl_output_dict
 
     if return_bc_logits:
@@ -173,6 +223,7 @@ def custom_forward(
         processed_logits_tensor[:bs], **logits_processor_args
     )
     output_dict["raw_logits"] = raw_logits
+    output_dict["intermediate_logits"] = processed_logits_tensor
     valid_start = model.vocab_size - model.config.n_action_bins
     valid_end = model.vocab_size
     processed_bc_logits = raw_logits[

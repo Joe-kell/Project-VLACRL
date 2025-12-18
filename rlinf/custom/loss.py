@@ -2,19 +2,25 @@ import torch
 import torch.nn.functional as F
 
 
-def behavior_cloning_loss(**kwargs):
-    predicted_actions = kwargs["action_tokens"]
-    expert_actions = kwargs["expert_action_tokens"]
+def behavior_cloning_ce_loss(**kwargs):
+    logits = kwargs["intermediate_logits"]
+    expert_actions_tokens = kwargs["expert_actions_tokens"]
     bc_coeff = kwargs["bc_coeff"]
+    vocab_size = kwargs["vocab_size"]
+    n_action_bins = kwargs["n_action_bins"]
 
-    bc_loss = F.mse_loss(predicted_actions, expert_actions, reduction="mean")
+    logits = logits.permute(0, 2, 1)  # [B, vocab-size, action-dim]
+
+    logits[:, : vocab_size - n_action_bins] = -torch.inf
+    logits[:, vocab_size:] = -torch.inf
+
+    bc_loss = F.cross_entropy(logits, target=expert_actions_tokens, reduction="mean")
     weighted_loss = bc_coeff * bc_loss
 
     metrics = {
         "bc/loss": bc_loss.detach().item(),
         "bc/weighted_loss": weighted_loss.detach().item(),
         "bc/coeff": bc_coeff,
-        "bc/mean_abs_error": (predicted_actions - expert_actions).abs().mean().item(),
     }
 
     return weighted_loss, metrics

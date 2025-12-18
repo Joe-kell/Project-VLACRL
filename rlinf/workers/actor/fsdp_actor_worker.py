@@ -34,14 +34,18 @@ from rlinf.algorithms.registry import actor_loss, calculate_adv_and_returns
 from rlinf.algorithms.utils import preprocess_advantages_inputs, preprocess_loss_inputs
 from rlinf.custom.libero_trajectory_dataset import LiberoSFTDataset
 from rlinf.custom.loss import (
-    behavior_cloning_loss,
+    behavior_cloning_ce_loss,
     behavior_cloning_loss_with_reference_logits,
 )
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import (
     FSDPModelManager,
 )
 from rlinf.models import get_model
-from rlinf.models.embodiment.model_utils import actor_forward, custom_forward
+from rlinf.models.embodiment.model_utils import (
+    actor_forward,
+    compute_action_tokens_from_actions,
+    custom_forward,
+)
 from rlinf.scheduler import Cluster, Worker
 from rlinf.utils.data_iter_utils import get_iterator_k_split
 from rlinf.utils.distributed import all_reduce_dict
@@ -137,6 +141,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 shuffle=True,
                 num_workers=0,
                 pin_memory=False,
+                drop_last=True,
             )
         )
 
@@ -534,8 +539,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     for k, v in bc_batch.items():
                         bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
-                    bc_batch = self.model.preprocess_for_train(bc_batch)
-
                 return_bc_logits = use_ref_logits_bc and bc_batch is not None
                 forward_result = actor_forward(
                     self.model,
@@ -628,20 +631,21 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             "current_logits": current_bc_logits,
                             "reference_logits": reference_bc_logits,
                             "bc_coeff": bc_coeff,
+                            "vocab_size": self.model.vocab_size,
+                            "n_action_bins": self.model.config.n_action_bins,
                         }
                         bc_loss, bc_metrics_data = (
                             behavior_cloning_loss_with_reference_logits(**kwargs)
                         )
                     else:
-                        raise NotImplementedError()
-                        # kwargs = {
-                        #     "action_tokens": torch.from_numpy(actions).to(
-                        #         f"cuda:{int(os.environ['LOCAL_RANK'])}"
-                        #     ),
-                        #     "expert_action_tokens": bc_batch["action_tokens"],
-                        #     "bc_coeff": bc_coeff,
-                        # }
-                        # bc_loss, bc_metrics_data = behavior_cloning_loss(**kwargs)
+                        kwargs = {
+                            "intermediate_logits": output_dict["intermediate_logits"],
+                            "expert_actions_tokens": compute_action_tokens_from_actions(
+                                self.model, bc_batch["actions"]
+                            ),
+                            "bc_coeff": bc_coeff,
+                        }
+                        bc_loss, bc_metrics_data = behavior_cloning_ce_loss(**kwargs)
 
                 loss = rl_loss + bc_loss
                 loss /= self.gradient_accumulation

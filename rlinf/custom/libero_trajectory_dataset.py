@@ -114,7 +114,7 @@ class LiberoSFTDataset(Dataset):
         action_chunks = torch.from_numpy(actions).float()
         output = {
             **processed_obs,
-            "action_tokens": action_chunks,
+            "actions": action_chunks,
         }
 
         if raw_action_logits is not None:
