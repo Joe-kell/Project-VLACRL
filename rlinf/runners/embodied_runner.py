@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import os
-import torch
 
+import torch
 from omegaconf.dictconfig import DictConfig
 from tqdm import tqdm
 
@@ -70,6 +70,7 @@ class EmbodiedRunner:
         actor_futures = self.actor.sync_model_to_rollout()
         actor_futures.wait()
         rollout_futures.wait()
+        self.actor.preallocate_memory()
 
     def generate_rollouts(self):
         env_futures = self.env.interact()

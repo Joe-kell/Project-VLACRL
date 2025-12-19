@@ -15,6 +15,7 @@
 import gc
 import json
 import os
+import time
 from contextlib import nullcontext
 from itertools import cycle
 
@@ -33,14 +34,18 @@ from rlinf.algorithms.registry import actor_loss, calculate_adv_and_returns
 from rlinf.algorithms.utils import preprocess_advantages_inputs, preprocess_loss_inputs
 from rlinf.custom.libero_trajectory_dataset import LiberoSFTDataset
 from rlinf.custom.loss import (
-    behavior_cloning_loss,
+    behavior_cloning_ce_loss,
     behavior_cloning_loss_with_reference_logits,
 )
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import (
     FSDPModelManager,
 )
-from rlinf.models import get_model, get_model_config_and_processor
-from rlinf.models.embodiment.model_utils import actor_forward, bc_custom_forward
+from rlinf.models import get_model
+from rlinf.models.embodiment.model_utils import (
+    actor_forward,
+    compute_action_tokens_from_actions,
+    custom_forward,
+)
 from rlinf.scheduler import Cluster, Worker
 from rlinf.utils.data_iter_utils import get_iterator_k_split
 from rlinf.utils.distributed import all_reduce_dict
@@ -88,6 +93,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         # initialize sft buffer
         self.use_experience_replay = cfg.algorithm.use_experience_replay
+        self.use_reference_logits_bc = cfg.algorithm.get(
+            "use_reference_logits_bc", False
+        )
         self.use_cached_bc_logits = cfg.algorithm.get("use_cached_bc_logits", False)
         self.logits_type = cfg.algorithm.get("logits_type", "processed")
         if self.logits_type not in ["processed", "raw"]:
@@ -97,6 +105,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         if self.use_experience_replay:
             self._init_sft_replay_buffer(use_cached_logits=self.use_cached_bc_logits)
+
+        self._preallocated_memory = None
 
         # Track training step for logit comparison checks
         self.training_step_count = 0
@@ -121,7 +131,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             rank=self._rank,
             world_size=self._world_size,
             use_cached_logits=use_cached_logits,
-            logits_type=self.logits_type,
+            logits_type=self.logits_type if self.use_reference_logits_bc else "",
         )
 
         self.sft_dataloader = cycle(
@@ -131,6 +141,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 shuffle=True,
                 num_workers=0,
                 pin_memory=False,
+                drop_last=True,
             )
         )
 
@@ -178,6 +189,49 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             torch.cuda.synchronize()
             gc.collect()
             torch.cuda.empty_cache()
+
+    def preallocate_memory(self):
+        """Preallocate GPU memory to prevent OOM during rollout."""
+        preallocate_gb = self.cfg.actor.get("preallocate", 0)
+        if preallocate_gb == 0:
+            return
+        # Convert GB to bytes
+        size_bytes = int(float(preallocate_gb) * 1024 * 1024 * 1024)
+        bytes_per_float32 = 4
+        num_elements = size_bytes // bytes_per_float32
+        if self._rank == 0:
+            print(
+                f"[INFO] Preallocating {preallocate_gb} GB of GPU memory on each actor worker..."
+            )
+        try:
+            self._preallocated_memory = torch.empty(
+                num_elements, dtype=torch.float32, device=self.device
+            )
+            torch.cuda.synchronize()
+            if self._rank == 0:
+                print(
+                    f"[INFO] Successfully preallocated {preallocate_gb} GB on GPU {self.device}"
+                )
+        except RuntimeError as e:
+            if self._rank == 0:
+                print(f"[ERROR] Failed to preallocate memory: {e}")
+            raise
+
+    def _deallocate_preallocated_memory(self):
+        """Deallocate preallocated memory before training."""
+        if self._preallocated_memory is not None:
+            if self._rank == 0:
+                size_gb = self._preallocated_memory.numel() * 4 / (1024**3)
+                print(f"[INFO] Deallocating {size_gb:.2f} GB of preallocated memory...")
+            del self._preallocated_memory
+            self._preallocated_memory = None
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            if self._rank == 0:
+                print("[INFO] Preallocated memory deallocated")
+        else:
+            if self._rank == 0:
+                print("[WARNING] No memory has been preallocated. Nothing to free.")
 
     def model_provider_func(self):
         model = get_model(self.cfg.actor.checkpoint_load_path, self.cfg.actor.model)
@@ -376,7 +430,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         with torch.no_grad():
             with adapter_ctx:
-                _, reference_bc_logits = bc_custom_forward(
+                _, reference_bc_logits = custom_forward(
                     self.model,
                     input_ids=bc_batch["input_ids"],
                     attention_mask=bc_batch["attention_mask"],
@@ -389,6 +443,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         return reference_bc_logits
 
     def run_training(self):
+        self._deallocate_preallocated_memory()
+
         if self.cfg.actor.get("enable_offload", False):
             self.load_fsdp_param_and_grad(self.device)
             self.load_fsdp_optimizer(self.device)
@@ -483,8 +539,6 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     for k, v in bc_batch.items():
                         bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
-                    bc_batch = self.model.preprocess_for_train(bc_batch)
-
                 return_bc_logits = use_ref_logits_bc and bc_batch is not None
                 forward_result = actor_forward(
                     self.model,
@@ -504,9 +558,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
 
                 if return_bc_logits:
-                    output_dict, actions, current_bc_logits = forward_result
+                    output_dict, current_bc_logits = forward_result
                 else:
-                    output_dict, actions = forward_result
+                    output_dict = forward_result
 
                 kwargs = {
                     "loss_type": self.cfg.algorithm.loss_type,
@@ -583,16 +637,20 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         )
                     else:
                         kwargs = {
-                            "action_tokens": torch.from_numpy(actions).to(
-                                f"cuda:{int(os.environ['LOCAL_RANK'])}"
+                            "intermediate_logits": output_dict["intermediate_logits"],
+                            "expert_actions_tokens": torch.tensor(
+                                compute_action_tokens_from_actions(
+                                    self.model, bc_batch["actions"]
+                                ),
+                                device=f"cuda:{int(os.environ['LOCAL_RANK'])}",
                             ),
-                            "expert_action_tokens": bc_batch["action_tokens"],
                             "bc_coeff": bc_coeff,
+                            "vocab_size": self.model.vocab_size,
+                            "n_action_bins": self.model.config.n_action_bins,
                         }
-                        bc_loss, bc_metrics_data = behavior_cloning_loss(**kwargs)
+                        bc_loss, bc_metrics_data = behavior_cloning_ce_loss(**kwargs)
 
                 loss = rl_loss + bc_loss
-
                 loss /= self.gradient_accumulation
                 loss.backward()
 
