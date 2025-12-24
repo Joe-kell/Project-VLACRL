@@ -1,6 +1,7 @@
 # Core System
+numpy==1.26.4
 accelerate
-ray[default]>=2.47.0
+ray[default]==2.49.1
 torch==2.6.0
 # Data processing
 pylatexenc
@@ -32,6 +33,8 @@ timm==0.9.10
 tensordict
 # git+https://github.com/Lifelong-Robot-Learning/LIBERO.git
 robosuite==1.4.1
+mujoco==3.3.5
 bddl
 easydict
 gym
+gymnasium
