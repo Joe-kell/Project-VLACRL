@@ -64,7 +64,7 @@ echo "Checkpoint Location: $CHECKPOINT_LOCATION"
 echo "Full Checkpoint Path: $CHECKPOINT_PATH"
 echo ""
 
-bash examples/embodiment/eval_embodiment.sh libero_spatial_grpo_openvlaoft_eval actor.model.lora_path="${CHECKPOINT_PATH}"
+bash examples/embodiment/eval_embodiment.sh libero_spatial_grpo_openvlaoft_eval +actor.model.lora_path="${CHECKPOINT_PATH}"
 
 # Print completion time
 echo "End Time: $(date)"

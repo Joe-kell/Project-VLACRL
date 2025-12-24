@@ -107,7 +107,7 @@ rollout:
   model_dir: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-spatial-traj1/"
   enable_offload: False
   pipeline_stage_num: 1
-  random_action: True
+  random_action: False
 
 actor:
   group_name: "ActorGroup"
