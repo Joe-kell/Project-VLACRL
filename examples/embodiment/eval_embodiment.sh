@@ -14,6 +14,9 @@ export SRC_FILE="${EMBODIED_PATH}/eval_embodied_agent.py"
 
 export MUJOCO_GL="egl"
 export PYOPENGL_PLATFORM="egl"
+# export MUJOCO_GL="osmesa"
+# export PYOPENGL_PLATFORM="osmesa"
+
 export PYTHONPATH=${REPO_PATH}:$PYTHONPATH
 # NOTE: set LIBERO_REPO_PATH to the path of the LIBERO repo
 # Defaults to ${REPO_PATH}/LIBERO if not set
@@ -36,20 +39,17 @@ else
         CONFIG_DIR=$(dirname "$1")
         CONFIG_NAME=$(basename "$1")
         CONFIG_PATH="${EMBODIED_PATH}/config/${CONFIG_DIR}/"
+        shift
     else
         # No subdirectory, use root config directory
         CONFIG_NAME=$1
         CONFIG_PATH="${EMBODIED_PATH}/config/"
+        shift
     fi
 fi
 
-# Shift to get remaining arguments (Hydra overrides)
-if [ -n "$2" ]; then
-    shift
-    HYDRA_OVERRIDES="$@"
-else
-    HYDRA_OVERRIDES=""
-fi
+# Get remaining arguments (Hydra overrides)
+HYDRA_OVERRIDES="$@"
 
 # If we pass actor.model.lora_path=..., store eval logs under:
 #   ${REPO_PATH}/logs/evals/<three path components before "checkpoints">/

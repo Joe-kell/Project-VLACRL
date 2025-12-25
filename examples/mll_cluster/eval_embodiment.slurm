@@ -10,7 +10,7 @@
 # #SBATCH --partition=mll            # Partition name (adjust to your cluster's partition)
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=jiahengh@utexas.edu
-#SBATCH --exclude=slurm-node-004,slurm-node-008
+#SBATCH --exclude=slurm-node-011,slurm-node-008
 
 # =============================================================================
 # MODULE LOADING

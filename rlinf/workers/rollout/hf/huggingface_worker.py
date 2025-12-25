@@ -305,10 +305,7 @@ class MultiStepRolloutWorker(Worker):
                     do_sample=not self._sampling_params["use_greedy"],
                     mode="eval",
                 )
-                # print(
-                #     f"chunk_actions shape: {chunk_actions.shape}, dtype: {chunk_actions.dtype}"
-                # )
-                # quit()
+
                 await self.send_chunk_actions(chunk_actions)
 
                 if "meta" in env_batch:

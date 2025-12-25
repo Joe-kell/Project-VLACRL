@@ -41,6 +41,7 @@ else
         CONFIG_DIR=$(dirname "$1")
         CONFIG_NAME=$(basename "$1")
         CONFIG_PATH="${EMBODIED_PATH}/config/${CONFIG_DIR}/"
+        shift
     else
         # No subdirectory, use root config directory
         CONFIG_NAME=$1
