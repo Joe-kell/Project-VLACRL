@@ -297,6 +297,132 @@ def custom_forward(
     return output_dict
 
 
+def bc_custom_forward(
+    model,
+    input_ids,
+    attention_mask,
+    pixel_values,
+    temperature=0.1,
+    top_k=50,
+    do_sample=False,
+    return_logits=False,
+    logits_type="processed",
+):
+    """Forward pass for creating dataset.
+
+    Args:
+        model: The model to use for forward pass
+        input_ids: Input token IDs
+        attention_mask: Attention mask
+        pixel_values: Pixel values for vision input
+        temperature: Temperature for sampling
+        top_k: Top-k filtering
+        do_sample: Whether to sample or use argmax
+        return_logits: If True, return raw logits in addition to actions
+
+    Returns:
+        If return_logits=False: actions (numpy array)
+        If return_logits=True: (actions, logits) tuple where logits are raw logits before temperature/top-k
+    """
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        pixel_values=pixel_values,
+        output_hidden_states=True,
+    )
+
+    n_prompt_tokens = input_ids.shape[-1] - 1
+    # Calculate number of patches (including proprio token and/or diffusion timestep embedding if present)
+    n_patches = (
+        model.vision_backbone.get_num_patches()
+        * model.vision_backbone.get_num_images_in_input()
+    )
+
+    # Extract hidden states for action tokens
+    last_hidden_states = outputs.hidden_states[-1]  # (B, seq_len, D)
+    # assert last_hidden_states.shape[1] == mm_embeddings.shape[1]
+
+    logits_tensor = outputs.logits[
+        :,
+        n_patches + n_prompt_tokens : n_patches
+        + n_prompt_tokens
+        + model.action_dim * model.num_action_chunks,
+        :,
+    ]  # [B, act, vocab_size + 64]
+
+    last_hidden_states = last_hidden_states[
+        :, -model.action_dim * model.num_action_chunks - 1 : -1
+    ]
+
+    # Store raw logits before masking (for reference model comparison)
+    raw_logits = logits_tensor.clone()
+
+    logits_tensor[..., : model.vocab_size - model.config.n_action_bins] = -torch.inf
+    logits_tensor[..., model.vocab_size :] = -torch.inf
+
+    processed_logits_tensor = logits_tensor / temperature
+    top_k = min(top_k, processed_logits_tensor.size(-1))  # Safety check
+    if top_k > 0:
+        logits_warper = TopKLogitsWarper(
+            top_k
+        )  # since here is logprob instead of logits, we use 0 instead of -inf
+        processed_logits_tensor = logits_warper(None, processed_logits_tensor)
+
+    processed_logprob_tensor = F.log_softmax(
+        processed_logits_tensor, dim=-1
+    )  # [B, act, vocab_size + 64]
+
+    if do_sample:
+        probs_tensor = torch.exp(processed_logprob_tensor)  # [B, act, vocab_size + 64]
+        probs_flat = probs_tensor.view(
+            -1, processed_logprob_tensor.shape[-1]
+        )  # [B * act, vocab_size + 64]
+
+        sample_flat = torch.multinomial(
+            probs_flat, num_samples=1, replacement=True
+        )  # [B * act, 1]
+        idxs = sample_flat.view(
+            processed_logprob_tensor.shape[0], processed_logprob_tensor.shape[1]
+        )  # [B, act]
+    else:
+        idxs = processed_logprob_tensor.argmax(dim=-1)  # [B, act]
+
+    assert torch.all(
+        idxs >= model.vocab_size - model.config.n_action_bins
+    ) and torch.all(idxs < model.vocab_size)
+
+    chunk_action_tokens = idxs.reshape(-1, model.action_dim)
+    predicted_action_token_ids = chunk_action_tokens.cpu().numpy()
+    discretized_actions = model.vocab_size - predicted_action_token_ids
+    discretized_actions = np.clip(
+        discretized_actions - 1, a_min=0, a_max=model.bin_centers.shape[0] - 1
+    )
+    # normalized_actions = model.bin_centers[discretized_actions]
+    normalized_actions = np.asarray(
+        [model.bin_centers[da] for da in discretized_actions]
+    )  # [B, dim]
+    normalized_actions = normalized_actions.reshape(-1, model.action_dim)
+
+    # Unnormalize predicted actions
+    actions = model._unnormalize_actions(normalized_actions, model.unnorm_key)
+    actions = actions.reshape(idxs.shape)
+
+    if return_logits:
+        if logits_type == "processed":
+            valid_start = model.vocab_size - model.config.n_action_bins
+            valid_end = model.vocab_size
+            processed_logits_tensor = processed_logits_tensor[
+                ..., valid_start:valid_end
+            ]  # [B, act, n_action_bins]
+            return actions, processed_logits_tensor
+        elif logits_type == "raw":
+            return actions, raw_logits  # raw_logits_valid
+        elif logits_type == "all":
+            return actions, raw_logits, processed_logits_tensor
+    else:
+        return actions
+
+
 def prepare_observations_for_vla(
     simulator_type: str,
     model_name: str,
