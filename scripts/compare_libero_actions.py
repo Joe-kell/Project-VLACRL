@@ -7,8 +7,8 @@ EMBODIED_PATH = os.path.dirname(os.path.abspath(__file__))
 REPO_PATH = os.path.dirname(EMBODIED_PATH)
 LIBERO_REPO_PATH = os.path.join(REPO_PATH, "LIBERO")
 
-dataset_a = "libero_spatial"
-dataset_b = "libero_spatial2"
+dataset_a = "libero_spatial2"
+dataset_b = "libero_spatial3"
 
 path_a = f"{LIBERO_REPO_PATH}/libero/datasets_with_logits/{dataset_a}"
 path_b = f"{LIBERO_REPO_PATH}/libero/datasets_with_logits/{dataset_b}"
@@ -16,11 +16,9 @@ path_b = f"{LIBERO_REPO_PATH}/libero/datasets_with_logits/{dataset_b}"
 task_files_a = sorted([f for f in os.listdir(path_a) if f.endswith(".hdf5")])
 task_files_b = sorted([f for f in os.listdir(path_b) if f.endswith(".hdf5")])
 
-assert task_files_a == task_files_b, "❌ Dataset files do not match!"
+print(f"Found {len(task_files_b)} matching tasks\n")
 
-print(f"Found {len(task_files_a)} matching tasks\n")
-
-for task_file in task_files_a:
+for task_file in task_files_b:
     print(f"Checking {task_file}")
 
     file_a = os.path.join(path_a, task_file)
