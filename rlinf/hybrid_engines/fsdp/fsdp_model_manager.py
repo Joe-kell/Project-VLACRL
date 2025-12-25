@@ -110,6 +110,110 @@ class FSDPModelManager:
             sync_module_states=True,
         )
 
+        param_groups = self._build_param_groups(betas)
+        self.optimizer = optim.AdamW(param_groups)
+
+    def _build_param_groups(self, betas):
+        use_component_lrs = self._cfg.optim.get("use_component_lrs", False)
+        use_layer_decay = self._cfg.optim.get("use_layer_decay", False)
+
+        # build original param groups
+        if not (use_component_lrs or use_layer_decay):
+            return self._build_default_param_groups(betas)
+
+        param_dict = self._categorize_parameters()
+
+        param_groups = []
+        if use_component_lrs:
+            param_groups.extend(self._build_component_groups(param_dict, betas))
+        elif use_layer_decay:
+            raise NotImplementedError()
+
+        return param_groups
+
+    def _build_component_groups(self, param_dict, betas):
+        """Build parameter groups based on model components."""
+        groups = []
+
+        # Component learning rates from config
+        component_lrs = {
+            "vision_lora": self._cfg.optim.get("vision_lora_lr", self._cfg.optim.lr),
+            "llm_lora": self._cfg.optim.get("llm_lora_lr", self._cfg.optim.lr),
+            "lm_head_lora": self._cfg.optim.get("lm_head_lora_lr", self._cfg.optim.lr),
+        }
+
+        for component, params in param_dict.items():
+            lr = component_lrs[component]
+            groups.append(
+                {"params": params, "lr": lr, "betas": betas, "name": component}
+            )
+
+            if self._rank == 0:
+                print(f"Component {component}: {len(params)} params, LR={lr}")
+
+        return groups
+
+    def _categorize_parameters(self):
+        param_dict = {
+            # "value_head": [],
+            "vision_lora": [],
+            "llm_lora": [],
+            "lm_head_lora": [],
+        }
+
+        # Store layer info for layer-wise decay
+        # param_layer_info = {}  # param_id -> (param, name, layer_num)
+
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # param_id = id(param)
+            # layer_num = self._extract_layer_number(name)
+            # param_layer_info[param_id] = (param, name, layer_num)
+
+            # Categorize by component
+            if "lora_" in name:
+                if self._is_vision_param(name):
+                    param_dict["vision_lora"].append(param)
+                elif self._is_llm_param(name):
+                    param_dict["llm_lora"].append(param)
+                elif self._is_lm_head(name):
+                    param_dict["lm_head_lora"].append(param)
+                else:
+                    raise NotImplementedError()
+
+        # Store for layer decay if needed
+        # self._param_layer_info = param_layer_info
+        return param_dict
+
+    # def _extract_layer_number(self, name):
+    #     """Extract layer number from parameter name."""
+    #     if "layers." in name:
+    #         try:
+    #             return int(name.split("layers.")[1].split(".")[0])
+    #         except:
+    #             pass
+    #     elif "layer." in name:
+    #         try:
+    #             return int(name.split("layer.")[1].split(".")[0])
+    #         except:
+    #             pass
+    #     return None
+
+    def _is_vision_param(self, name):
+        """Check if parameter belongs to vision backbone."""
+        return "vision_backbone" in name or ".projector." in name
+
+    def _is_llm_param(self, name):
+        """Check if parameter belongs to LLM."""
+        return "language_model" in name and "lm_head" not in name
+
+    def _is_lm_head(self, name):
+        """Check if parameter belongs to LM head."""
+        return "lm_head" in name
+
+    def _build_default_param_groups(self, betas):
         # NOTE: Currently we assume that only the value head contains "value_head" in its name.
         # The value head only serves for value prediction in RL algorithms like PPO.
         param_groups = [
@@ -137,7 +241,7 @@ class FSDPModelManager:
                 }
             )
 
-        self.optimizer = optim.AdamW(param_groups)
+        return param_groups
 
     def get_model_state_dict(self):
         with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT):
