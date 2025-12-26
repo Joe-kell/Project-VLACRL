@@ -5,7 +5,6 @@
 #SBATCH --cpus-per-task=80              # Number of CPUs per task
 #SBATCH --gres=gpu:4                    # Number of GPUs (RECOMMENDED: 4+ GPUs)
 #SBATCH --time=4:00:00                  # Maximum execution time (HH:MM:SS)
-#SBATCH --error=logs/%x-%j.err               # Error file name
 #SBATCH --mem=490G                       # Memory per node (adjust as needed)
 # #SBATCH --partition=mll            # Partition name (adjust to your cluster's partition)
 #SBATCH --mail-type=FAIL,END

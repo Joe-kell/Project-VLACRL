@@ -22,7 +22,7 @@ runner:
     log_path: "../results"
     project_name: rlinf
     experiment_name: "eval_openvla"
-    logger_backends: ["wandb"] # wandb, swanlab
+    logger_backends: ["tensorboard"] # wandb, swanlab
 
   max_epochs: 1000
   max_steps: -1
