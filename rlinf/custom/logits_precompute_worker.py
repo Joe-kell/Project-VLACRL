@@ -45,7 +45,7 @@ class LogitsPrecomputeWorker(Worker):
 
         if self.output_dir is None:
             self.output_dir = os.path.join(
-                self.root_dir, "libero", "datasets_with_logits", task_suite_name
+                self.root_dir, "libero", "datasets_with_logits", f"{task_suite_name}4"
             )
 
         # Get task files and shard them across workers
