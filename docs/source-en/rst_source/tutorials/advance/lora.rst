@@ -16,12 +16,14 @@ LoRA can be configured in the actor model section of your YAML configuration:
       is_lora: True
       lora_rank: 32
       lora_path: null  # or path to existing LoRA weights
+      lora_scale: 1.0  # scale LoRA contribution (0.0 = base-only)
 
 **Parameters:**
 
 - ``is_lora``: Enable LoRA fine-tuning (True/False)
 - ``lora_rank``: Rank of LoRA matrices (typically 8-64), LoRA trains two matrices A and B for each layer, with shapes [input-dim, lora-rank] and [lora-rank, output-dim] respectively
 - ``lora_path``: Path to pre-trained LoRA weights (null for new training)
+- ``lora_scale``: Multiplier applied to LoRA contribution (default 1.0). Set to 0.0 to effectively disable the adapter without changing checkpoints.
 
 Target Modules
 ---------------

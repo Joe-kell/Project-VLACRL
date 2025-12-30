@@ -58,12 +58,24 @@ HYDRA_OVERRIDES="$@"
 #
 # Otherwise, store under:
 #   ${REPO_PATH}/logs/evals/base
+#
+# If actor.model.lora_scale is provided, append it to the log subdirectory:
+#   logs/evals/.../lora_scale_0_5/...
 LORA_PATH=""
 if [[ " ${HYDRA_OVERRIDES} " =~ actor\.model\.lora_path=([^[:space:]]+) ]]; then
     LORA_PATH="${BASH_REMATCH[1]}"
     # Strip optional single/double quotes around the value
     LORA_PATH="${LORA_PATH%\"}"; LORA_PATH="${LORA_PATH#\"}"
     LORA_PATH="${LORA_PATH%\'}"; LORA_PATH="${LORA_PATH#\'}"
+fi
+
+# Extract lora_scale from Hydra overrides
+LORA_SCALE=""
+if [[ " ${HYDRA_OVERRIDES} " =~ actor\.model\.lora_scale=([^[:space:]]+) ]]; then
+    LORA_SCALE="${BASH_REMATCH[1]}"
+    # Strip optional single/double quotes around the value
+    LORA_SCALE="${LORA_SCALE%\"}"; LORA_SCALE="${LORA_SCALE#\"}"
+    LORA_SCALE="${LORA_SCALE%\'}"; LORA_SCALE="${LORA_SCALE#\'}"
 fi
 
 LOG_SUBDIR="base"
@@ -82,6 +94,13 @@ if [ -n "${LORA_PATH}" ]; then
             LOG_SUBDIR="${PARTS[N-1]}"
         fi
     fi
+fi
+
+# Append lora_scale to LOG_SUBDIR if provided
+if [ -n "${LORA_SCALE}" ]; then
+    # Format lora_scale for use in path (replace dot with underscore, e.g., 0.5 -> 0_5)
+    LORA_SCALE_PATH=$(echo "$LORA_SCALE" | tr '.' '_')
+    LOG_SUBDIR="${LOG_SUBDIR}_lora_scale/lora_scale_${LORA_SCALE_PATH}"
 fi
 
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")

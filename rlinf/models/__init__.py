@@ -28,6 +28,56 @@ from transformers import (
 from rlinf.config import torch_dtype_from_precision
 
 
+def _apply_lora_scale_if_present(model, lora_scale: float):
+    """
+    Apply a global multiplier to LoRA contribution.
+
+    This scales the per-adapter scaling factors inside PEFT LoRA layers so that:
+      - lora_scale=0.0 behaves like the base model (adapter disabled)
+      - lora_scale=1.0 is the default LoRA behavior
+      - values in between interpolate smoothly
+    
+    Raises:
+        ValueError: If lora_scale is None or cannot be converted to float
+        RuntimeError: If no LoRA modules with scaling are found in the model
+    """
+    if lora_scale is None:
+        raise ValueError("lora_scale cannot be None. It must be a numeric value (default: 1.0)")
+    
+    try:
+        lora_scale = float(lora_scale)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"lora_scale must be a numeric value, got {type(lora_scale).__name__}: {lora_scale}") from e
+    
+    if lora_scale == 1.0:
+        return model
+
+    # PEFT LoRA modules commonly expose a `scaling` dict keyed by adapter name.
+    # We update all adapters we find to keep behavior consistent.
+    scaled_count = 0
+    for module in model.modules():
+        scaling = getattr(module, "scaling", None)
+        if isinstance(scaling, dict) and len(scaling) > 0:
+            for adapter_name in list(scaling.keys()):
+                try:
+                    old_value = scaling[adapter_name]
+                    scaling[adapter_name] = float(old_value) * lora_scale
+                    scaled_count += 1
+                except (TypeError, ValueError) as e:
+                    raise ValueError(
+                        f"Failed to scale LoRA adapter '{adapter_name}' in module {type(module).__name__}: "
+                        f"scaling value {old_value} is not numeric"
+                    ) from e
+
+    if scaled_count == 0:
+        raise RuntimeError(
+            "No LoRA modules with scaling found in the model. "
+            "This may indicate that the model is not a PEFT model or LoRA adapters are not properly configured."
+        )
+
+    return model
+
+
 def get_model_config_and_processor(cfg: DictConfig):
     if cfg.model.model_name == "openvla":
         from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
@@ -180,7 +230,90 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
         model = model.cuda()
 
     if cfg.is_lora:
-        if not hasattr(cfg, "lora_path") or cfg.lora_path is None:
+        # Default is 1.0 (no scaling change) for backward compatibility.
+        lora_scale = getattr(cfg, "lora_scale", 1.0)
+        
+        # Support for multiple LoRA adapters (lora_paths) or single adapter (lora_path)
+        # For multiple adapters, we merge them sequentially into the base model
+        lora_paths = getattr(cfg, "lora_paths", None)
+        lora_path = getattr(cfg, "lora_path", None)
+        
+        if lora_paths is not None and len(lora_paths) > 0:
+            # Multiple LoRA adapters: merge them sequentially into base model
+            # This makes all previous adapters "active" (part of the base model)
+            # Then we'll add a new trainable adapter on top
+            print(f"Loading and merging {len(lora_paths)} previous LoRA adapters into base model:")
+            print(f"  Adapters: {lora_paths}")
+            
+            # Get merge coefficient for previous adapters (default 1.0)
+            merge_coefficient = getattr(cfg, "previous_lora_merge_coefficient", 1.0)
+            merge_coefficient = float(merge_coefficient)
+            if merge_coefficient < 0.0 or merge_coefficient > 1.0:
+                raise ValueError(f"previous_lora_merge_coefficient must be between 0.0 and 1.0, got {merge_coefficient}")
+            
+            if merge_coefficient != 1.0:
+                print(f"  Merge coefficient: {merge_coefficient} (will scale previous adapter weights)")
+            
+            # Merge all previous adapters sequentially into base model
+            merged_count = 0
+            for idx, adapter_path in enumerate(lora_paths):
+                if os.path.exists(adapter_path):
+                    print(f"  [{idx+1}/{len(lora_paths)}] Loading adapter from {adapter_path}")
+                    peft_model = PeftModel.from_pretrained(model, adapter_path, is_trainable=False)
+                    
+                    # Apply merge coefficient by scaling the adapter weights before merging
+                    if merge_coefficient != 1.0:
+                        print(f"    Applying merge coefficient {merge_coefficient} to adapter weights...")
+                        # Scale LoRA adapter contribution by modifying the scaling factors
+                        # This is cleaner than directly modifying weights
+                        for name, module in peft_model.named_modules():
+                            # Scale the adapter scaling factors
+                            scaling = getattr(module, "scaling", None)
+                            if isinstance(scaling, dict) and len(scaling) > 0:
+                                for adapter_name in list(scaling.keys()):
+                                    old_scaling = scaling[adapter_name]
+                                    scaling[adapter_name] = float(old_scaling) * merge_coefficient
+                                    print(f"      Scaled {name}.scaling[{adapter_name}]: {old_scaling} -> {scaling[adapter_name]}")
+                            
+                            # Also scale lora_B weights directly if scaling dict doesn't exist
+                            # (some PEFT implementations don't use scaling dict)
+                            if hasattr(module, "lora_B") and not isinstance(getattr(module, "scaling", None), dict):
+                                for adapter_name in module.lora_B.keys():
+                                    if module.lora_B[adapter_name] is not None:
+                                        module.lora_B[adapter_name].data *= merge_coefficient
+                    
+                    # Merge this adapter into the base model (makes it part of the base)
+                    print(f"    Merging adapter into base model...")
+                    model = peft_model.merge_and_unload()
+                    merged_count += 1
+                else:
+                    raise ValueError(f"Adapter path {adapter_path} does not exist")
+            
+            print(f"  ✓ Successfully merged {merged_count} adapter(s) into base model with coefficient {merge_coefficient}")
+            print(f"  → Base model now contains knowledge from {merged_count} previous task(s)")
+            
+            # After merging all previous adapters, create a NEW trainable LoRA adapter on top
+            # This new adapter will be the only trainable one
+            print(f"  Creating new trainable LoRA adapter on top of merged model...")
+            lora_config = LoraConfig(
+                r=cfg.lora_rank,
+                lora_alpha=cfg.lora_rank,
+                lora_dropout=0.0,
+                target_modules=[
+                    "proj", "qkv", "fc1", "fc2", "q", "kv", "fc3",
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj", "lm_head",
+                ],
+                init_lora_weights="gaussian",
+            )
+            model = get_peft_model(model, lora_config)
+            print(f"  ✓ New trainable LoRA adapter created (only this adapter will be updated during training)")
+        elif lora_path is not None:
+            # Single LoRA adapter (backward compatibility)
+            print(f"Loading LoRA adapter from {cfg.lora_path}")
+            model = PeftModel.from_pretrained(model, cfg.lora_path, is_trainable=True)
+        else:
+            # Create new LoRA adapter (for new task training)
             lora_config = LoraConfig(
                 r=cfg.lora_rank,
                 lora_alpha=cfg.lora_rank,
@@ -205,9 +338,8 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
                 init_lora_weights="gaussian",
             )
             model = get_peft_model(model, lora_config)
-        else:
-            print(f"Loading LoRA adapter from {cfg.lora_path}")
-            model = PeftModel.from_pretrained(model, cfg.lora_path, is_trainable=True)
+
+        model = _apply_lora_scale_if_present(model, lora_scale)
 
         if hasattr(model, "value_head"):
             for param in model.value_head.parameters():
