@@ -8,8 +8,8 @@ EMBODIED_PATH = os.path.dirname(os.path.abspath(__file__))
 REPO_PATH = os.path.dirname(EMBODIED_PATH)
 LIBERO_REPO_PATH = os.path.join(REPO_PATH, "LIBERO")
 
-dataset = "libero_spatial_bcrl03"
-path = f"{LIBERO_REPO_PATH}/libero/datasets_with_logits/{dataset}"
+dataset = "libero_spatial_simplevla"
+path = f"{LIBERO_REPO_PATH}/libero/datasets/{dataset}"
 
 video_out_dir = os.path.join(path, "videos_demo0")
 os.makedirs(video_out_dir, exist_ok=True)
@@ -41,18 +41,17 @@ for task_file in task_files:
             if key == "actions":
                 print(f"        Actions: {data[:][:5, :]}")
 
-        # # --------- VIDEO EXPORT ----------
-        # frames = demo["obs"]["agentview_rgb"][:]  # (T, H, W, 3)
-        # frames = frames.astype(np.uint8)
+        # --------- VIDEO EXPORT ----------
+        frames = demo["obs"]["agentview_rgb"][:]  # (T, H, W, 3)
+        frames = frames.astype(np.uint8)
 
-        # writer = imageio.get_writer(video_path, fps=20, codec="libx264", quality=8)
+        writer = imageio.get_writer(video_path, fps=20, codec="libx264", quality=8)
 
-        # for frame in frames:
-        #     frame = np.flipud(frame)
-        #     writer.append_data(frame)
+        for frame in frames:
+            writer.append_data(frame)
 
-        # writer.close()
+        writer.close()
 
-        # print(f"    🎥 Saved video to {video_path}")
+        print(f"    🎥 Saved video to {video_path}")
 
     print("\n--------------------------------------\n")
