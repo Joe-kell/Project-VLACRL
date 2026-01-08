@@ -9,7 +9,7 @@ REPO_PATH = os.path.dirname(EMBODIED_PATH)
 LIBERO_REPO_PATH = os.path.join(REPO_PATH, "LIBERO")
 
 dataset = "libero_spatial_simplevla"
-path = f"{LIBERO_REPO_PATH}/libero/datasets/{dataset}"
+path = f"{LIBERO_REPO_PATH}/libero/datasets_with_logits/{dataset}"
 
 video_out_dir = os.path.join(path, "videos_demo0")
 os.makedirs(video_out_dir, exist_ok=True)
@@ -26,10 +26,9 @@ for task_file in task_files:
     task_name = task_file.replace(".hdf5", "")
     video_path = os.path.join(video_out_dir, f"{task_name}_demo0.mp4")
 
-    print(f"Inspecting {task_file}")
-
     with h5py.File(file_path, "r") as f:
-        demo = f["data"]["demo_0"]
+        print(f"Inspecting {task_file} with {len(f['data'])} demos")
+        demo = f["data"]["demo_1"]
 
         for key in demo.keys():
             data = demo[key]
