@@ -22,11 +22,11 @@
 # module load gcc/9.3.0                 # Compiler (if needed)
 # module list                           # Verify loaded modules
 
-### Usage: sbatch eval_embodiment_lora_scale.slurm CHECKPOINT_LOCATION [CURRENT_LORA_SCALE] [PREVIOUS_LORA_COEFF]
-### Example (single LoRA): sbatch eval_embodiment_lora_scale.slurm logs/bcrl_logit/0.3/task_0 0.5
-### Example (multi-LoRA): sbatch eval_embodiment_lora_scale.slurm logs/naive_lora_multilora/task_2_coeff_0_9
-### Example (multi-LoRA with current scale): sbatch eval_embodiment_lora_scale.slurm logs/naive_lora_multilora/task_2_coeff_0_9 0.7
-### Example (multi-LoRA with both overrides): sbatch eval_embodiment_lora_scale.slurm logs/naive_lora_multilora/task_2_coeff_0_9 0.7 0.8
+### Usage: sbatch examples/mll_cluster/eval_embodiment_lora_scale.slurm CHECKPOINT_LOCATION [CURRENT_LORA_SCALE] [PREVIOUS_LORA_COEFF]
+### Example (single LoRA): sbatch examples/mll_cluster/eval_embodiment_lora_scale.slurm logs/bcrl_logit/0.3/task_0 0.5
+### Example (multi-LoRA): sbatch examples/mll_cluster/eval_embodiment_lora_scale.slurm logs/naive_lora_multilora/task_2_coeff_0_9
+### Example (multi-LoRA with current scale): sbatch examples/mll_cluster/eval_embodiment_lora_scale.slurm logs/naive_lora_multilora/task_2_coeff_0_9 0.7
+### Example (multi-LoRA with both overrides): sbatch examples/mll_cluster/eval_embodiment_lora_scale.slurm logs/naive_lora_multilora/task_2_coeff_0_9 0.7 0.8
 ### Note: CHECKPOINT_LOCATION should be relative to workspace root (e.g., logs/bcrl_logit/0.3/task_0)
 ###       The script will construct the full path: ${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_10/actor/
 ###       For multi-LoRA checkpoints (path contains "multilora" and "coeff_"), the script will:

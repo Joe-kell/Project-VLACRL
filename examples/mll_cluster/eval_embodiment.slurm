@@ -22,8 +22,8 @@
 # module load gcc/9.3.0                 # Compiler (if needed)
 # module list                           # Verify loaded modules
 
-### Usage: sbatch eval_embodiment.slurm CHECKPOINT_LOCATION
-### Example: sbatch eval_embodiment.slurm logs/bcrl_logit/0.3/task_0
+### Usage: sbatch examples/mll_cluster/eval_embodiment.slurm CHECKPOINT_LOCATION
+### Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0
 ### Note: CHECKPOINT_LOCATION should be relative to workspace root (e.g., logs/bcrl_logit/0.3/task_0)
 ###       The script will construct the full path: ${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_10/actor/
 

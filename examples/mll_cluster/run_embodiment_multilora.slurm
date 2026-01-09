@@ -11,10 +11,10 @@
 #SBATCH --mail-user=jiahengh@utexas.edu
 #SBATCH --exclude=slurm-node-004,slurm-node-011
 
-### Usage: sbatch run_embodiment_multilora.slurm TASK_ID [MERGE_COEFFICIENT] [CONFIG_NAME]
-### Example: sbatch run_embodiment_multilora.slurm 0
-### Example: sbatch run_embodiment_multilora.slurm 1 0.8
-### Example: sbatch run_embodiment_multilora.slurm 2 0.8
+### Usage: sbatch examples/mll_cluster/run_embodiment_multilora.slurm TASK_ID [MERGE_COEFFICIENT] [CONFIG_NAME]
+### Example: sbatch examples/mll_cluster/run_embodiment_multilora.slurm 0
+### Example: sbatch examples/mll_cluster/run_embodiment_multilora.slurm 1 0.8
+### Example: sbatch examples/mll_cluster/run_embodiment_multilora.slurm 2 0.8
 ###
 ### Behavior:
 ###   - TASK_ID=0: Train first LoRA adapter on top of base model (same as naive LoRA)
@@ -36,7 +36,7 @@ CONFIG_NAME=${3:-mll_cluster/libero_spatial_grpo_openvlaoft}  # Default config i
 
 if [ -z "$TASK_ID" ]; then
     echo "ERROR: Missing required argument"
-    echo "Usage: sbatch run_embodiment_multilora.slurm TASK_ID [MERGE_COEFFICIENT] [CONFIG_NAME]"
+    echo "Usage: sbatch examples/mll_cluster/run_embodiment_multilora.slurm TASK_ID [MERGE_COEFFICIENT] [CONFIG_NAME]"
     exit 1
 fi
 

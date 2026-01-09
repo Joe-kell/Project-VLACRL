@@ -12,8 +12,8 @@
 #SBATCH --exclude=slurm-node-004,slurm-node-008
 
 
-### Usage: sbatch run_embodiment.slurm TASK_ID BC_COEFF [CHECKPOINT_PATH] [CONFIG_NAME]
-### Example: sbatch run_embodiment.slurm 0 0.1 libero_spatial_grpo_openvlaoft_bcrl
+### Usage: sbatch examples/mll_cluster/run_embodiment_bcrl_action.slurm TASK_ID BC_COEFF [CHECKPOINT_PATH] [CONFIG_NAME]
+### Example: sbatch examples/mll_cluster/run_embodiment_bcrl_action.slurm 0 0.1 libero_spatial_grpo_openvlaoft_bcrl
 ### Note: CHECKPOINT_PATH is now optional and will be auto-generated from previous task if not provided
 
 TASK_ID=$1
@@ -23,7 +23,7 @@ CONFIG_NAME=${4:-libero_spatial_grpo_openvlaoft_bcrl}  # Default config if not p
 
 if [ -z "$TASK_ID" ] || [ -z "$BC_COEFF" ]; then
     echo "ERROR: Missing required arguments"
-    echo "Usage: sbatch run_embodiment.slurm TASK_ID BC_COEFF [CHECKPOINT_PATH] [CONFIG_NAME]"
+    echo "Usage: sbatch examples/mll_cluster/run_embodiment_bcrl_action.slurm TASK_ID BC_COEFF [CHECKPOINT_PATH] [CONFIG_NAME]"
     exit 1
 fi
 
