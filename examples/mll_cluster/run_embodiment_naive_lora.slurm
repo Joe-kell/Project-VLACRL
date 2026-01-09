@@ -12,34 +12,59 @@
 #SBATCH --exclude=slurm-node-004,slurm-node-011
 
 
-### Usage: sbatch run_embodiment_naive_lora.slurm TASK_ID [CHECKPOINT_PATH] [CONFIG_NAME]
-### Example: sbatch run_embodiment_naive_lora.slurm 0
-### Example: sbatch run_embodiment_naive_lora.slurm 1
-### Note: CHECKPOINT_PATH is now optional and will be auto-generated from previous task if not provided
+### Usage: sbatch examples/mll_cluster/run_embodiment_naive_lora.slurm TASK_ID [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME]
+### Example: sbatch examples/mll_cluster/run_embodiment_naive_lora.slurm 0
+### Example: sbatch examples/mll_cluster/run_embodiment_naive_lora.slurm 1
+### Example (with max_epoch): sbatch examples/mll_cluster/run_embodiment_naive_lora.slurm 0 "" 15
+### Example (continue from checkpoint): sbatch examples/mll_cluster/run_embodiment_naive_lora.slurm 0 ./logs/naive_lora/task_0/checkpoints/global_step_10/actor 20
+### Note: CHECKPOINT_PATH is optional and will be auto-generated from previous task if not provided
+###       MAX_EPOCH is optional and can always be specified to override the default max_epochs
 
 TASK_ID=$1
 MANUAL_CHECKPOINT_PATH=$2
-CONFIG_NAME=${3:-mll_cluster/libero_spatial_grpo_openvlaoft}  # Default config if not provided
+MAX_EPOCH=$3
+CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 
 if [ -z "$TASK_ID" ]; then
     echo "ERROR: Missing required argument"
-    echo "Usage: sbatch run_embodiment_naive_lora.slurm TASK_ID [CHECKPOINT_PATH] [CONFIG_NAME]"
+    echo "Usage: sbatch examples/mll_cluster/run_embodiment_naive_lora.slurm TASK_ID [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME]"
     exit 1
 fi
 
 # Automatically determine checkpoint path if not manually provided
 if [ -z "$MANUAL_CHECKPOINT_PATH" ]; then
     if [ "$TASK_ID" -eq 0 ]; then
-        # Task 0 uses base model, no checkpoint
         CHECKPOINT_PATH=""
     else
-        # Use checkpoint from previous task
         PREV_TASK_ID=$((TASK_ID - 1))
         CHECKPOINT_PATH="./logs/naive_lora/task_${PREV_TASK_ID}/checkpoints/global_step_10/actor"
     fi
 else
-    # Use manually provided checkpoint path
     CHECKPOINT_PATH="$MANUAL_CHECKPOINT_PATH"
+fi
+
+# Determine LOG_DIR based on checkpoint path
+if [ -n "$MANUAL_CHECKPOINT_PATH" ]; then
+    # Extract task ID and global_step from checkpoint path
+    # e.g., .../task_0/checkpoints/global_step_10/actor -> task_0, step_10
+    if [[ "$CHECKPOINT_PATH" =~ task_([0-9]+) ]]; then
+        SOURCE_TASK="${BASH_REMATCH[1]}"
+        if [[ "$CHECKPOINT_PATH" =~ global_step_([0-9]+) ]]; then
+            SOURCE_STEP="${BASH_REMATCH[1]}"
+            LOG_DIR="./logs/naive_lora/task_${TASK_ID}_from_task_${SOURCE_TASK}_step_${SOURCE_STEP}"
+        else
+            echo "ERROR: Could not extract global_step from checkpoint path: $CHECKPOINT_PATH"
+            echo "       Expected format: .../checkpoints/global_step_<M>/actor"
+            exit 1
+        fi
+    else
+        echo "ERROR: Could not extract task ID from checkpoint path: $CHECKPOINT_PATH"
+        echo "       Expected format: .../task_<N>/checkpoints/global_step_<M>/actor"
+        exit 1
+    fi
+else
+    # Standard case: use TASK_ID
+    LOG_DIR="./logs/naive_lora/task_${TASK_ID}"
 fi
 
 # Print job information
@@ -53,17 +78,14 @@ echo "GPUs allocated: $SLURM_GPUS_ON_NODE"
 echo ""
 
 mkdir -p logs/naive_lora
-LOG_DIR="./logs/naive_lora/task_${TASK_ID}"
 export LOG_DIR
 
-EXPERIMENT_NAME="naive_lora_task_${TASK_ID}"
+# Set experiment name based on LOG_DIR (for wandb)
+EXPERIMENT_NAME=$(basename "$LOG_DIR")
 
-# Update SLURM job name to be more descriptive (based on LOG_DIR)
-# Extract the last component of LOG_DIR (e.g., "task_0")
-LOG_DIR_BASENAME=$(basename "$LOG_DIR")
+# Update SLURM job name to match experiment name
 if command -v scontrol &> /dev/null && [ -n "$SLURM_JOB_ID" ]; then
-    # Use the directory name from LOG_DIR (e.g., "task_0")
-    scontrol update job=$SLURM_JOB_ID name="${LOG_DIR_BASENAME}" 2>/dev/null || true
+    scontrol update job=$SLURM_JOB_ID name="${EXPERIMENT_NAME}" 2>/dev/null || true
 fi
 
 echo "========================================="
@@ -76,20 +98,21 @@ echo "  Checkpoint Save Path: $LOG_DIR"
 echo "  Config Name: $CONFIG_NAME"
 
 if [ -n "$CHECKPOINT_PATH" ]; then
-    if [ -n "$MANUAL_CHECKPOINT_PATH" ]; then
-        echo "  Loading from checkpoint (manually specified): $CHECKPOINT_PATH"
-    else
-        echo "  Loading from checkpoint (auto-generated from task $((TASK_ID - 1))): $CHECKPOINT_PATH"
-    fi
-
-    # Verify checkpoint exists
     if [ ! -d "$CHECKPOINT_PATH" ]; then
         echo "  ERROR: Checkpoint not found at $CHECKPOINT_PATH"
         exit 1
     fi
-    CHECKPOINT_ARG="+actor.model.lora_path=${CHECKPOINT_PATH}"
+    echo "  Loading from checkpoint: $CHECKPOINT_PATH"
 else
     echo "  Training from base model (SFT checkpoint) - Task 0"
+fi
+
+if [ -n "$MAX_EPOCH" ]; then
+    if ! [[ "$MAX_EPOCH" =~ ^[0-9]+$ ]] || [ "$MAX_EPOCH" -le 0 ]; then
+        echo "  ERROR: MAX_EPOCH must be a positive integer, got: $MAX_EPOCH"
+        exit 1
+    fi
+    echo "  Max epochs: $MAX_EPOCH"
 fi
 
 echo "========================================="
@@ -97,13 +120,17 @@ echo ""
 
 cd $SLURM_SUBMIT_DIR
 
-# hydra overrides
+# Build Hydra overrides
 OVERRIDES="env.fixed_task_ids=[${TASK_ID}] \
 	runner.logger.experiment_name=${EXPERIMENT_NAME} \
 	actor.checkpoint_save_path=${LOG_DIR}"
 
 if [ -n "$CHECKPOINT_PATH" ]; then
-    OVERRIDES="$OVERRIDES ${CHECKPOINT_ARG}"
+    OVERRIDES="$OVERRIDES +actor.model.lora_path=${CHECKPOINT_PATH}"
+fi
+
+if [ -n "$MAX_EPOCH" ]; then
+    OVERRIDES="$OVERRIDES runner.max_epochs=${MAX_EPOCH}"
 fi
 
 echo "Running with Hydra overrides:"
@@ -127,4 +154,3 @@ echo "Finished at: $(date)"
 echo "========================================="
 
 exit $EXIT_CODE
-
