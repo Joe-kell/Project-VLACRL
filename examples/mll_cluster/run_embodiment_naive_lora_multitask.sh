@@ -1,20 +1,24 @@
 #!/bin/bash
-### Usage: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh TASK_IDS [MAX_EPOCH] [CONFIG_NAME]
+### Usage: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh TASK_IDS [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME]
 ### Example: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh "0,2,4"
 ### Example: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh "0 2 4"
-### Example (with max_epoch): bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh "0,2,4" 15
+### Example (with max_epoch): bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh "0,2,4" "" 15
+### Example (continue from checkpoint): bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh "0,2,4" ./logs/naive_lora_multitask/tasks_0_2_4/checkpoints/global_step_10/actor 20
 ### Note: TASK_IDS can be comma-separated (e.g., "0,2,4") or space-separated (e.g., "0 2 4")
+###       CHECKPOINT_PATH is optional and will load model weights (LoRA adapter)
 ###       Evaluation runs automatically every 10 global steps during training
 ###       MAX_EPOCH is optional and can override the default max_epochs
 
 TASK_IDS_STR=$1
-MAX_EPOCH=$2
-CONFIG_NAME=${3:-mll_cluster/libero_spatial_grpo_openvlaoft}
+CHECKPOINT_PATH=$2
+MAX_EPOCH=$3
+CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 
 if [ -z "$TASK_IDS_STR" ]; then
     echo "ERROR: Missing required argument"
-    echo "Usage: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh TASK_IDS [MAX_EPOCH] [CONFIG_NAME]"
+    echo "Usage: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh TASK_IDS [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME]"
     echo "Example: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh \"0,2,4\""
+    echo "Example (with checkpoint): bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh \"0,2,4\" ./logs/naive_lora_multitask/tasks_0_2_4/checkpoints/global_step_10/actor"
     exit 1
 fi
 
@@ -40,6 +44,22 @@ TASK_LIST_STR=$(IFS=','; echo "${sorted_task_ids[*]}")
 # Create task list string for directory name (underscore-separated)
 TASK_DIR_STR=$(IFS='_'; echo "${sorted_task_ids[*]}")
 
+# Determine LOG_DIR based on checkpoint path
+if [ -n "$CHECKPOINT_PATH" ]; then
+    # Extract global_step from checkpoint path
+    # e.g., .../checkpoints/global_step_10/actor -> step_10
+    if [[ "$CHECKPOINT_PATH" =~ global_step_([0-9]+) ]]; then
+        SOURCE_STEP="${BASH_REMATCH[1]}"
+        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_step_${SOURCE_STEP}"
+    else
+        # Fallback: use a generic name
+        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint"
+    fi
+else
+    # Standard case: use task IDs
+    LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}"
+fi
+
 # Print job information (only if running under SLURM)
 if [ -n "$SLURM_JOB_ID" ]; then
     echo "Job ID: $SLURM_JOB_ID"
@@ -54,7 +74,7 @@ echo ""
 
 mkdir -p logs/slurm
 mkdir -p logs/naive_lora_multitask
-export LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}"
+export LOG_DIR
 
 # Set experiment name based on LOG_DIR (for wandb)
 EXPERIMENT_NAME=$(basename "$LOG_DIR")
@@ -75,6 +95,16 @@ echo "  Checkpoint Save Path: $LOG_DIR"
 echo "  Config Name: $CONFIG_NAME"
 echo "  Evaluation: After training completes (all checkpoints)"
 
+if [ -n "$CHECKPOINT_PATH" ]; then
+    if [ ! -d "$CHECKPOINT_PATH" ]; then
+        echo "  ERROR: Checkpoint not found at $CHECKPOINT_PATH"
+        exit 1
+    fi
+    echo "  Loading from checkpoint: $CHECKPOINT_PATH"
+else
+    echo "  Training from base model - Multi-task setup (SFT checkpoint)"
+fi
+
 if [ -n "$MAX_EPOCH" ]; then
     if ! [[ "$MAX_EPOCH" =~ ^[0-9]+$ ]] || [ "$MAX_EPOCH" -le 0 ]; then
         echo "  ERROR: MAX_EPOCH must be a positive integer, got: $MAX_EPOCH"
@@ -83,7 +113,6 @@ if [ -n "$MAX_EPOCH" ]; then
     echo "  Max epochs: $MAX_EPOCH"
 fi
 
-echo "  Training from base model (SFT checkpoint) - Multi-task setup"
 echo "========================================="
 echo ""
 
@@ -102,6 +131,11 @@ fi
 OVERRIDES="env.fixed_task_ids=[${TASK_LIST_STR}] \
 	runner.logger.experiment_name=${EXPERIMENT_NAME} \
 	actor.checkpoint_save_path=${LOG_DIR}"
+
+if [ -n "$CHECKPOINT_PATH" ]; then
+    # Set lora_path to load LoRA adapter weights (like single-task version)
+    OVERRIDES="$OVERRIDES +actor.model.lora_path=${CHECKPOINT_PATH}"
+fi
 
 if [ -n "$MAX_EPOCH" ]; then
     OVERRIDES="$OVERRIDES runner.max_epochs=${MAX_EPOCH}"
@@ -122,56 +156,6 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "Tasks trained: ${sorted_task_ids[*]}"
     echo "Checkpoint saved to: ${LOG_DIR}"
     echo ""
-    
-    # Skip evaluation if using test config
-    if [[ "$CONFIG_NAME" == *"test"* ]] || [[ "$CONFIG_NAME" == *"libero_spatial_grpo_openvlaoft_test"* ]]; then
-        echo "Skipping evaluation (test config detected: $CONFIG_NAME)"
-    else
-        # Discover and evaluate all checkpoints
-        CHECKPOINTS_DIR="${LOG_DIR}/checkpoints"
-        if [ ! -d "$CHECKPOINTS_DIR" ]; then
-            echo "Warning: Checkpoints directory not found at $CHECKPOINTS_DIR"
-        else
-            echo "Discovering checkpoints for evaluation..."
-            # Find all global_step directories and extract step numbers
-            # Use find to get directories, extract step numbers, sort numerically
-            CHECKPOINT_STEPS=($(find "$CHECKPOINTS_DIR" -maxdepth 1 -type d -name "global_step_*" | sed 's|.*/global_step_||' | sort -n))
-            
-            if [ ${#CHECKPOINT_STEPS[@]} -eq 0 ]; then
-                echo "Warning: No checkpoints found in $CHECKPOINTS_DIR"
-            else
-                echo "Found ${#CHECKPOINT_STEPS[@]} checkpoint(s) at steps: ${CHECKPOINT_STEPS[*]}"
-                echo ""
-                echo "Running evaluation for each checkpoint..."
-                echo ""
-                
-                CHECKPOINT_LOCATION=$(echo "$LOG_DIR" | sed 's|^\./||')
-                EVAL_EXIT_CODE=0
-                
-                for STEP in "${CHECKPOINT_STEPS[@]}"; do
-                    echo "========================================="
-                    echo "Evaluating checkpoint at global_step_${STEP}"
-                    echo "========================================="
-                    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "${STEP}"
-                    
-                    STEP_EXIT_CODE=$?
-                    if [ $STEP_EXIT_CODE -ne 0 ]; then
-                        echo "  Warning: Evaluation for step ${STEP} failed (exit code: $STEP_EXIT_CODE)"
-                        EVAL_EXIT_CODE=$STEP_EXIT_CODE
-                    else
-                        echo "  ✓ Evaluation for step ${STEP} completed successfully"
-                    fi
-                    echo ""
-                done
-                
-                if [ $EVAL_EXIT_CODE -eq 0 ]; then
-                    echo "All checkpoint evaluations completed successfully"
-                else
-                    echo "Some checkpoint evaluations failed (last exit code: $EVAL_EXIT_CODE)"
-                fi
-            fi
-        fi
-    fi
 else
     echo "✗ Multi-task training failed with exit code $EXIT_CODE"
     echo "  Tasks: ${sorted_task_ids[*]}"

@@ -107,65 +107,153 @@ def compute_evaluate_metrics(eval_metrics_list):
 
 
 def compute_rollout_metrics(data_buffer: Dict) -> Dict:
-    rollout_metrics = {}
+    """
+    Compute rollout metrics in a data-parallel setting.
 
-    if "rewards" in data_buffer:
-        rewards = data_buffer["rewards"].clone()
-        mean_rewards = torch.mean(rewards).to(torch.cuda.current_device())
-        torch.distributed.all_reduce(mean_rewards, op=torch.distributed.ReduceOp.AVG)
+    Key constraints:
+    - All ranks must participate in the same sequence of collective ops.
+    - Some ranks may be missing certain keys (e.g., task-specific env_info),
+      especially in multi-task settings.
 
-        rewards_metrics = {
-            "rewards": mean_rewards.item(),
+    This implementation:
+    - Ensures all ranks participate in the all_reduce calls for rewards,
+      advantages, and returns if any rank has them.
+    - Gathers the union of env_info keys across ranks and processes them
+      in a consistent, sorted order, using zeros on ranks that lack a key.
+    """
+    import torch.distributed as dist
+
+    rollout_metrics: Dict[str, float] = {}
+
+    # ---- rewards / advantages / returns ----
+    required_keys = ["rewards", "advantages", "returns"]
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+    if dist.is_initialized() and world_size > 1:
+        # For each key, determine if any rank has it
+        local_has_keys = {key: key in data_buffer for key in required_keys}
+        all_has_keys_list = [None] * world_size
+        dist.all_gather_object(all_has_keys_list, local_has_keys)
+
+        keys_to_process = {
+            key: any(rank_has.get(key, False) for rank_has in all_has_keys_list)
+            for key in required_keys
         }
-        rollout_metrics.update(rewards_metrics)
+    else:
+        # Single process: just use local presence
+        keys_to_process = {key: key in data_buffer for key in required_keys}
 
-    if "advantages" in data_buffer:
-        advantages = data_buffer["advantages"]
-        mean_adv = torch.mean(advantages).to(torch.cuda.current_device())
-        torch.distributed.all_reduce(mean_adv, op=torch.distributed.ReduceOp.AVG)
-        max_adv = torch.max(advantages).detach().item()
-        min_adv = torch.min(advantages).detach().item()
+    # Rewards
+    if keys_to_process.get("rewards", False):
+        if "rewards" in data_buffer:
+            rewards = data_buffer["rewards"].clone()
+            mean_rewards = torch.mean(rewards).to(torch.cuda.current_device())
+        else:
+            # Rank without rewards still participates in all_reduce
+            mean_rewards = torch.tensor(
+                0.0, device=torch.cuda.current_device(), dtype=torch.float32
+            )
+
+        if dist.is_initialized() and world_size > 1:
+            dist.all_reduce(mean_rewards, op=dist.ReduceOp.AVG)
+
+        rollout_metrics["rewards"] = mean_rewards.item()
+
+    # Advantages
+    if keys_to_process.get("advantages", False):
+        if "advantages" in data_buffer:
+            advantages = data_buffer["advantages"]
+            mean_adv = torch.mean(advantages).to(torch.cuda.current_device())
+            max_adv = torch.max(advantages).detach().item()
+            min_adv = torch.min(advantages).detach().item()
+        else:
+            # Rank without advantages still participates in all_reduce
+            mean_adv = torch.tensor(
+                0.0, device=torch.cuda.current_device(), dtype=torch.float32
+            )
+            max_adv = float("-inf")
+            min_adv = float("inf")
+
+        if dist.is_initialized() and world_size > 1:
+            dist.all_reduce(mean_adv, op=dist.ReduceOp.AVG)
+
         reduce_adv_tensor = torch.as_tensor(
-            [-min_adv, max_adv], device=torch.cuda.current_device(), dtype=torch.float32
+            [-min_adv, max_adv],
+            device=torch.cuda.current_device(),
+            dtype=torch.float32,
         )
-        torch.distributed.all_reduce(
-            reduce_adv_tensor, op=torch.distributed.ReduceOp.MAX
-        )
+        if dist.is_initialized() and world_size > 1:
+            dist.all_reduce(reduce_adv_tensor, op=dist.ReduceOp.MAX)
         min_adv, max_adv = reduce_adv_tensor.tolist()
 
-        advantages_metrics = {
-            "advantages_mean": mean_adv.item(),
-            "advantages_max": max_adv,
-            "advantages_min": -min_adv,
-        }
-        rollout_metrics.update(advantages_metrics)
+        rollout_metrics.update(
+            {
+                "advantages_mean": mean_adv.item(),
+                "advantages_max": max_adv,
+                "advantages_min": -min_adv,
+            }
+        )
 
-    if "returns" in data_buffer:
-        returns = data_buffer["returns"]
-        mean_ret = torch.mean(returns).to(torch.cuda.current_device())
-        torch.distributed.all_reduce(mean_ret, op=torch.distributed.ReduceOp.AVG)
-        max_ret = torch.max(returns).detach().item()
-        min_ret = torch.min(returns).detach().item()
+    # Returns
+    if keys_to_process.get("returns", False):
+        if "returns" in data_buffer:
+            returns = data_buffer["returns"]
+            mean_ret = torch.mean(returns).to(torch.cuda.current_device())
+            max_ret = torch.max(returns).detach().item()
+            min_ret = torch.min(returns).detach().item()
+        else:
+            mean_ret = torch.tensor(
+                0.0, device=torch.cuda.current_device(), dtype=torch.float32
+            )
+            max_ret = float("-inf")
+            min_ret = float("inf")
+
+        if dist.is_initialized() and world_size > 1:
+            dist.all_reduce(mean_ret, op=dist.ReduceOp.AVG)
+
         reduce_ret_tensor = torch.as_tensor(
-            [-min_ret, max_ret], device=torch.cuda.current_device(), dtype=torch.float32
+            [-min_ret, max_ret],
+            device=torch.cuda.current_device(),
+            dtype=torch.float32,
         )
-        torch.distributed.all_reduce(
-            reduce_ret_tensor, op=torch.distributed.ReduceOp.MAX
-        )
+        if dist.is_initialized() and world_size > 1:
+            dist.all_reduce(reduce_ret_tensor, op=dist.ReduceOp.MAX)
         min_ret, max_ret = reduce_ret_tensor.tolist()
 
-        returns_metrics = {
-            "returns_mean": mean_ret.item(),
-            "returns_max": max_ret,
-            "returns_min": -min_ret,
-        }
-        rollout_metrics.update(returns_metrics)
+        rollout_metrics.update(
+            {
+                "returns_mean": mean_ret.item(),
+                "returns_max": max_ret,
+                "returns_min": -min_ret,
+            }
+        )
 
-    env_info_keys = [key for key in data_buffer if key.startswith("env_info/")]
-    for env_info_key in env_info_keys:
-        value = data_buffer.pop(env_info_key)
-        value = value.float().mean().to(torch.cuda.current_device())
-        torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.AVG)
+    # ---- env_info/* keys ----
+    # Collect union of env_info keys across all ranks, and ensure every rank
+    # calls all_reduce for each key in the same order.
+    local_env_info_keys = sorted(
+        key for key in data_buffer.keys() if key.startswith("env_info/")
+    )
+
+    if dist.is_initialized() and world_size > 1:
+        keys_list = [None] * world_size
+        dist.all_gather_object(keys_list, local_env_info_keys)
+        all_env_info_keys = sorted({k for keys in keys_list for k in keys})
+    else:
+        all_env_info_keys = local_env_info_keys
+
+    for env_info_key in all_env_info_keys:
+        if env_info_key in data_buffer:
+            value = data_buffer.pop(env_info_key)
+            value = value.float().mean().to(torch.cuda.current_device())
+        else:
+            value = torch.tensor(
+                0.0, device=torch.cuda.current_device(), dtype=torch.float32
+            )
+
+        if dist.is_initialized() and world_size > 1:
+            dist.all_reduce(value, op=dist.ReduceOp.AVG)
+
         rollout_metrics[env_info_key] = value.item()
 
     return rollout_metrics

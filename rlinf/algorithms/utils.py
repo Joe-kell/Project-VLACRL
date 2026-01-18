@@ -94,7 +94,10 @@ def preprocess_loss_inputs(**kwargs) -> dict:
         advantages = advantages.sum(dim=-1)
 
     if entropy is not None:
-        if entropy_type == "action_level":
+        if entropy_type == "token_level" and logprob_type == "token_level":
+            # Reshape entropy to match logprobs shape: (bsz, -1, single_action_dim)
+            entropy = entropy.reshape(bsz, -1, single_action_dim)
+        elif entropy_type == "action_level":
             entropy = entropy.reshape(bsz, -1, single_action_dim).sum(dim=-1)
         elif entropy_type == "chunk_level":
             entropy = entropy.sum(dim=-1)

@@ -23,19 +23,40 @@
 # module load gcc/9.3.0                 # Compiler (if needed)
 # module list                           # Verify loaded modules
 
-### Usage: sbatch examples/mll_cluster/eval_embodiment.slurm CHECKPOINT_LOCATION
+### Usage: sbatch examples/mll_cluster/eval_embodiment.slurm CHECKPOINT_LOCATION [STEP_NUMBER ...]
 ### Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0
+### Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0 20
+### Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0 10 20 30
 ### Note: CHECKPOINT_LOCATION should be relative to workspace root (e.g., logs/bcrl_logit/0.3/task_0)
-###       The script will construct the full path: ${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_10/actor/
+###       The script will construct the full path: ${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_${STEP_NUMBER}/actor/
+###       STEP_NUMBER: global step number(s) - if multiple provided, all will be evaluated sequentially (default: 10)
 
 CHECKPOINT_LOCATION=$1
+shift  # Remove CHECKPOINT_LOCATION from $@, leaving STEP_NUMBER arguments (if any)
 
 if [ -z "$CHECKPOINT_LOCATION" ]; then
     echo "ERROR: Missing required argument"
-    echo "Usage: sbatch examples/mll_cluster/eval_embodiment.slurm CHECKPOINT_LOCATION"
+    echo "Usage: sbatch examples/mll_cluster/eval_embodiment.slurm CHECKPOINT_LOCATION [STEP_NUMBER ...]"
     echo "Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0"
+    echo "Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0 20"
+    echo "Example: sbatch examples/mll_cluster/eval_embodiment.slurm logs/bcrl_logit/0.3/task_0 10 20 30"
     exit 1
 fi
+
+# If no STEP_NUMBER arguments provided, default to 10
+if [ $# -eq 0 ]; then
+    STEP_NUMBERS=(10)
+else
+    STEP_NUMBERS=("$@")
+fi
+
+# Validate all STEP_NUMBER arguments
+for STEP_NUM in "${STEP_NUMBERS[@]}"; do
+    if ! [[ "$STEP_NUM" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: All STEP_NUMBER arguments must be positive integers, got: $STEP_NUM"
+        exit 1
+    fi
+done
 
 # Get workspace root (SLURM_SUBMIT_DIR is the directory where sbatch was run from)
 cd $SLURM_SUBMIT_DIR
@@ -61,8 +82,38 @@ echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
 echo "GPUs allocated: $SLURM_GPUS_ON_NODE"
 echo ""
 
-# Call the bash script that contains the core evaluation logic
-bash examples/mll_cluster/eval_embodiment.sh "$CHECKPOINT_LOCATION"
+# Call the bash script that contains the core evaluation logic for each STEP_NUMBER
+TOTAL_STEPS=${#STEP_NUMBERS[@]}
+CURRENT_STEP=0
+
+for STEP_NUMBER in "${STEP_NUMBERS[@]}"; do
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    echo "================================================================================"
+    echo "Evaluating step $STEP_NUMBER ($CURRENT_STEP of $TOTAL_STEPS)"
+    echo "================================================================================"
+    echo ""
+    
+    # Call the bash script with the current STEP_NUMBER
+    bash examples/mll_cluster/eval_embodiment.sh "$CHECKPOINT_LOCATION" "$STEP_NUMBER"
+    
+    EXIT_CODE=$?
+    
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo ""
+        echo "ERROR: Evaluation failed for step $STEP_NUMBER"
+        echo "Aborting remaining evaluations."
+        exit $EXIT_CODE
+    fi
+    
+    echo ""
+    echo "Successfully completed evaluation for step $STEP_NUMBER"
+    echo ""
+done
+
+echo "================================================================================"
+echo "All evaluations completed successfully!"
+echo "Evaluated steps: ${STEP_NUMBERS[*]}"
+echo "================================================================================"
 
 # Print completion time
 echo ""

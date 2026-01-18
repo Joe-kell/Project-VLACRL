@@ -344,6 +344,8 @@ def compute_embodied_grpo_actor_loss_fn(**kwargs) -> Tuple[torch.Tensor, Dict]:
         loss_mask (Optional[torch.Tensor]): Mask tensor of shape to apply to the loss
         loss_mask_sum (Optional[torch.Tensor]): Calculate ratio tensor for normalizing the loss when using a mask
         max_episode_steps (Optional[int]): Maximum episode steps for normalization
+        entropy (Optional[torch.Tensor]): Entropy values for entropy bonus
+        entropy_bonus (float): Entropy bonus coefficient
 
     Returns:
         Tuple[torch.Tensor, Dict]: Policy gradient loss and metrics dictionary containing:
@@ -360,6 +362,8 @@ def compute_embodied_grpo_actor_loss_fn(**kwargs) -> Tuple[torch.Tensor, Dict]:
     loss_mask = kwargs.get("loss_mask", None)
     loss_mask_sum = kwargs.get("loss_mask_sum", None)
     max_episode_steps = kwargs.get("max_episode_steps", None)
+    entropy = kwargs.get("entropy", None)
+    entropy_bonus = kwargs.get("entropy_bonus", 0.0)
 
     loss_mask_ratio = (
         (loss_mask_sum * 1.0) / max_episode_steps if loss_mask is not None else None
@@ -389,14 +393,25 @@ def compute_embodied_grpo_actor_loss_fn(**kwargs) -> Tuple[torch.Tensor, Dict]:
         clip_fraction = torch.gt(policy_loss2, policy_loss).float().mean()  # float
         ppo_kl = (-logratio).mean()
 
+    # Add entropy bonus if entropy is provided
+    entropy_loss = torch.tensor(0.0, device=policy_loss.device)
+    if entropy is not None and entropy_bonus > 0:
+        if loss_mask is not None:
+            entropy_loss = masked_mean(entropy, loss_mask)
+        else:
+            entropy_loss = entropy.mean()
+
+    total_loss = policy_loss - entropy_bonus * entropy_loss
+
     # Compile metrics for logging
     metrics_data = {
-        "actor/raw_loss": policy_loss.detach().item(),
+        "actor/raw_loss": total_loss.detach().item(),
         "actor/policy_loss": policy_loss.detach().item(),
         "actor/policy_clipfrac": clip_fraction.detach().item(),
         "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/entropy_loss": entropy_loss.detach().item(),
     }
-    return policy_loss, metrics_data
+    return total_loss, metrics_data
 
 
 @register_policy_loss("math_ppo_actor")

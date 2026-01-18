@@ -30,21 +30,28 @@ def concat_dict_list(list_of_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
     Values of other types are collected into lists.
 
     Args:
-        list_of_dicts: Input list of dictionaries, where each dictionary contains the same set of keys
+        list_of_dicts: Input list of dictionaries. In multi-task settings, dictionaries
+            may have different keys (e.g., task-specific env_info). This function will
+            only concatenate keys that are present in ALL dictionaries.
 
     Returns:
-        Processed dictionary where tensors/arrays are concatenated, and other types are stored as lists
+        Processed dictionary where tensors/arrays are concatenated, and other types are stored as lists.
+        Only includes keys that exist in all input dictionaries.
     """
     if not list_of_dicts:
         return {}
 
-    # Get all keys (based on the first dictionary) and sort them for consistency
-    keys = sorted(list_of_dicts[0].keys())
+    # Get intersection of all keys across all dictionaries
+    # This handles cases where dictionaries may have different keys (e.g., multi-task env_info)
+    all_keys = set(list_of_dicts[0].keys())
+    for d in list_of_dicts[1:]:
+        all_keys &= set(d.keys())
+    
+    keys = sorted(all_keys)
     result = {key: [] for key in keys}
 
     for d in list_of_dicts:
         for key in keys:
-            assert key in d, f"Missing key in dictionary: {key}"
             result[key].append(d[key])
 
     for key in result:

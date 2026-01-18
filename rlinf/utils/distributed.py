@@ -720,6 +720,18 @@ class VocabUtility:
 def all_reduce_dict(
     dictionary, dtype=torch.float32, group=None, op=torch.distributed.ReduceOp.SUM
 ):
+    """
+    Reduce a dictionary of scalar values across all ranks.
+
+    IMPORTANT: All ranks must have the same set of keys, otherwise the
+    all_reduce will hang due to mismatched tensor sizes. For dictionaries
+    with potentially uneven keys (e.g., task-specific metrics in multi-task
+    settings), gather keys first and ensure all ranks participate in the
+    same sequence of operations.
+    """
+    if not dictionary:
+        return {}
+    
     keys = sorted(dictionary)
     tensor = torch.as_tensor(
         [dictionary[k] for k in keys], dtype=dtype, device=torch.cuda.current_device()

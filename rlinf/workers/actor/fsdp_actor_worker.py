@@ -24,7 +24,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from peft import get_peft_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+from torch.distributed.fsdp import FullOptimStateDictConfig, FullStateDictConfig, StateDictType
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -52,7 +52,7 @@ from rlinf.utils.distributed import all_reduce_dict
 from rlinf.utils.metric_utils import (
     append_to_dict,
     compute_loss_mask,
-    compute_rollout_metrics,
+    compute_rollout_metrics as compute_rollout_metrics_simple,
     compute_split_num,
 )
 from rlinf.utils.placement import HybridComponentPlacement
@@ -118,6 +118,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         )
         # if not self.enable_logit_check:
         #     exit()
+        
+        # Enable garbage outputs for fast debugging (bypasses model inference)
+        self.use_garbage_outputs = cfg.actor.get("use_garbage_outputs", False)
+        if self.use_garbage_outputs and self._rank == 0:
+            print(
+                "WARNING: use_garbage_outputs is enabled. Actor will generate fake outputs "
+                "instead of running model inference. This is for debugging only!"
+            )
 
     def _init_sft_replay_buffer(self, use_cached_logits=False):
         dataset_path = os.environ.get("LIBERO_REPO_PATH")
@@ -265,23 +273,31 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         self.rollout_batch = {}
         recv_list = []
-        for i in range(split_num):
+        for _ in range(split_num):
             recv_list.append(
                 await self.channel.get(
                     queue_name=self._replay_buffer_name, async_op=True
                 ).async_wait()
             )
 
-        # shape [num_chunk, bsz, chunk_size], cat dim 1
-        for key in recv_list[0].keys():
+        # Collect all keys from all batches (not just the first one).
+        # This is important for multi-task where different batches may have
+        # different env_info keys.
+        all_keys = set()
+        for recv_batch in recv_list:
+            all_keys.update(recv_batch.keys())
+
+        # Concatenate along the correct dimension for each key.
+        for key in all_keys:
+            batches_with_key = [i for i in range(split_num) if key in recv_list[i]]
+            if not batches_with_key:
+                continue
+
+            tensors = [recv_list[i][key] for i in batches_with_key]
             if "env_info/" not in key:
-                self.rollout_batch[key] = torch.cat(
-                    [recv_list[i][key] for i in range(split_num)], dim=1
-                )
+                self.rollout_batch[key] = torch.cat(tensors, dim=1)
             else:
-                self.rollout_batch[key] = torch.cat(
-                    [recv_list[i][key] for i in range(split_num)], dim=0
-                )
+                self.rollout_batch[key] = torch.cat(tensors, dim=0)
 
         self.rollout_batch = self._process_received_rollout_batch(self.rollout_batch)
 
@@ -292,6 +308,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """
         rollout_epoch = self.cfg.algorithm.rollout_epoch
         for key, value in rollout_batch.items():
+            if "env_info/" in key:
+                continue
             new_value = value.reshape(
                 rollout_epoch, -1, *value.shape[1:]
             )  # [rollout_epoch, n_chunk_step, bsz, ...]
@@ -369,37 +387,46 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.rollout_batch["logprob"] = self.rollout_batch["prev_logprobs"]
 
     def compute_advantages_and_returns(self):
+        """
+        Compute advantages and returns on the actor side and aggregate
+        rollout-level metrics in a distributed-safe way.
+        """
         stage_num = self.cfg.rollout.pipeline_stage_num
         env_world_size = self._component_placement.get_world_size("env")
         actor_world_size = self._component_placement.get_world_size("actor")
         num_group_envs_for_train = (
-            self.cfg.algorithm.num_group_envs
-            * stage_num
-            * env_world_size
-            // actor_world_size
-        )
+            self.cfg.algorithm.num_group_envs * stage_num * env_world_size
+        ) // actor_world_size
+
+        rewards = self.rollout_batch["rewards"]
+        dones = self.rollout_batch["dones"]
+        prev_values = self.rollout_batch.get("prev_values", None)
+        loss_mask = self.rollout_batch.get("loss_mask", None)
 
         kwargs = {
             "adv_type": self.cfg.algorithm.adv_type,
-            "rewards": self.rollout_batch["rewards"],
-            "dones": self.rollout_batch["dones"],
+            "rewards": rewards,
+            "dones": dones,
             "normalize_advantages": self.cfg.algorithm.get(
                 "normalize_advantages", True
             ),
-            "values": self.rollout_batch.get("prev_values", None),
+            "values": prev_values,
             "gamma": self.cfg.algorithm.get("gamma", 1),
             "gae_lambda": self.cfg.algorithm.get("gae_lambda", 1),
             "num_group_envs": num_group_envs_for_train,
             "group_size": self.cfg.algorithm.get("group_size", 8),
             "reward_type": self.cfg.algorithm.reward_type,
-            "loss_mask": self.rollout_batch.get("loss_mask", None),
+            "loss_mask": loss_mask,
             "rollout_epoch": self.cfg.algorithm.get("rollout_epoch", 1),
         }
+
         kwargs = preprocess_advantages_inputs(**kwargs)
         advantages, returns = calculate_adv_and_returns(**kwargs)
 
         self.rollout_batch.update({"advantages": advantages, "returns": returns})
-        rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+
+        # This uses the distributed-safe implementation in metric_utils.
+        rollout_metrics = compute_rollout_metrics_simple(self.rollout_batch)
         return rollout_metrics
 
     def _get_peft_base_model(self):
@@ -443,6 +470,65 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
         return reference_bc_logits
 
+    def _generate_garbage_outputs(self, batch_size, action_token_len, value_model=False, return_bc_logits=False, bc_batch_size=None):
+        """
+        Generate garbage/fake outputs with correct shapes for debugging training.
+        This bypasses model inference to speed up training iteration during debugging.
+        
+        Args:
+            batch_size: Batch size (B)
+            action_token_len: Total action token length (action_dim * num_action_chunks)
+            value_model: Whether to include values in output
+            return_bc_logits: Whether to return BC logits
+            bc_batch_size: Batch size for BC logits (if return_bc_logits is True)
+        
+        Returns:
+            output_dict: Dictionary with fake outputs matching actor_forward structure
+            bc_logits: Optional fake BC logits (if return_bc_logits is True)
+        """
+        device = f"cuda:{int(os.environ['LOCAL_RANK'])}"
+        vocab_size = self.model.vocab_size
+        n_action_bins = self.model.config.n_action_bins
+        
+        # Generate random logprobs: [B, action_token_len]
+        logprobs = torch.randn(batch_size, action_token_len, device=device, requires_grad=True)
+        
+        # Generate random entropy: [B, action_token_len]
+        entropy = torch.rand(batch_size, action_token_len, device=device, requires_grad=True)
+        
+        # Generate random raw logits: [B, action_token_len, vocab_size]
+        raw_logits = torch.randn(batch_size, action_token_len, vocab_size, device=device, requires_grad=True)
+        
+        # Generate random intermediate logits: [B, action_token_len, vocab_size]
+        intermediate_logits = torch.randn(batch_size, action_token_len, vocab_size, device=device, requires_grad=True)
+        
+        # Generate random processed logits: [B, action_token_len, n_action_bins]
+        processed_logits = torch.randn(batch_size, action_token_len, n_action_bins, device=device, requires_grad=True)
+        
+        output_dict = {
+            "logprobs": logprobs,
+            "entropy": entropy,
+            "raw_logits": raw_logits,
+            "intermediate_logits": intermediate_logits,
+            "processed_logits": processed_logits,
+        }
+        
+        # Add values if needed
+        if value_model:
+            values = torch.randn(batch_size, 1, device=device, requires_grad=True)
+            output_dict["values"] = values
+        
+        if return_bc_logits:
+            if bc_batch_size is None:
+                bc_batch_size = batch_size
+            if self.logits_type == "processed":
+                bc_logits = torch.randn(bc_batch_size, action_token_len, n_action_bins, device=device, requires_grad=True)
+            else:  # raw
+                bc_logits = torch.randn(bc_batch_size, action_token_len, vocab_size, device=device, requires_grad=True)
+            return output_dict, bc_logits
+        else:
+            return output_dict
+
     def run_training(self):
         self._deallocate_preallocated_memory()
 
@@ -456,6 +542,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch["input_ids"].shape[0]
             * self.rollout_batch["input_ids"].shape[1]
         )
+
         shuffle_id = torch.randperm(rollout_size)
 
         for key, value in self.rollout_batch.items():
@@ -493,12 +580,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch,
             rollout_size // batch_size_per_rank,
         )
+
         bc_coeff = self.cfg.algorithm.get("bc_coeff", 0.0)
 
         metrics = {}
+        num_batches = 0
         for _, train_global_batch in tqdm(
-            enumerate(rollout_dataloader_iter), desc="get loss and metrics"
+            enumerate(rollout_dataloader_iter),
+            desc=f"get loss and metrics (rank={self._rank})",
         ):
+            num_batches += 1
+
             # split batch into micro_batches
             train_global_batch_size = train_global_batch["input_ids"].shape[0]
             assert (
@@ -541,22 +633,36 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
                 return_bc_logits = use_ref_logits_bc and bc_batch is not None
-                forward_result = actor_forward(
-                    self.model,
-                    rl_batch=data,
-                    bc_batch=bc_batch,
-                    action_token_len=action_token_len,
-                    value_model=True
-                    if self.cfg.algorithm.adv_type == "embodied_gae"
-                    else False,
-                    value_head_mode=self.cfg.actor.model.get("vh_mode", None),
-                    temperature=self.cfg.algorithm.sampling_params.temperature_train,
-                    top_k=self.cfg.algorithm.sampling_params.top_k,
-                    logits_processor_args=logits_processor_args,
-                    do_sample=not sampling_params["use_greedy"],
-                    return_bc_logits=return_bc_logits,
-                    logits_type=self.logits_type,
-                )
+                
+                if self.use_garbage_outputs:
+                    # Generate garbage outputs for fast debugging (bypasses model inference)
+                    batch_size = data["input_ids"].shape[0]
+                    value_model = self.cfg.algorithm.adv_type == "embodied_gae"
+                    bc_batch_size = bc_batch["input_ids"].shape[0] if bc_batch is not None else None
+                    forward_result = self._generate_garbage_outputs(
+                        batch_size=batch_size,
+                        action_token_len=action_token_len,
+                        value_model=value_model,
+                        return_bc_logits=return_bc_logits,
+                        bc_batch_size=bc_batch_size,
+                    )
+                else:
+                    forward_result = actor_forward(
+                        self.model,
+                        rl_batch=data,
+                        bc_batch=bc_batch,
+                        action_token_len=action_token_len,
+                        value_model=True
+                        if self.cfg.algorithm.adv_type == "embodied_gae"
+                        else False,
+                        value_head_mode=self.cfg.actor.model.get("vh_mode", None),
+                        temperature=self.cfg.algorithm.sampling_params.temperature_train,
+                        top_k=self.cfg.algorithm.sampling_params.top_k,
+                        logits_processor_args=logits_processor_args,
+                        do_sample=not sampling_params["use_greedy"],
+                        return_bc_logits=return_bc_logits,
+                        logits_type=self.logits_type,
+                    )
 
                 if return_bc_logits:
                     output_dict, current_bc_logits = forward_result
@@ -726,3 +832,4 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 torch.save(optim_state, os.path.join(save_base_path, "optim.pt"))
 
         torch.distributed.barrier()
+
