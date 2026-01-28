@@ -15,12 +15,13 @@
 
 ### NOTE: this script is meant for sequential launching of tasks in hand-crafted order. 
 ###       The first task will always load from base model.
-### Usage: sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm TASK_IDS [RUN_ID] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+### Usage: sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm TASK_IDS [RUN_ID] [MAX_EPOCH] [CONFIG_NAME] [SEED] [INIT_CHECKPOINT]
 ### Example: sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm "0,1,2"
 ### Example: sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm "0 1 2"
 ### Example (with run_id): sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm "0,1,2" "run1"
 ### Example (with max_epoch): sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm "0,1,2" "" 15
 ### Example (with seed): sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm "0,1,2" "" "" "" 42
+### Example (with initial checkpoint): sbatch examples/mll_cluster/run_embodiment_naive_lora_sequential.slurm "0,1,2" "" "" "" 42 logs/naive_lora_sequential/seq_0_1_2_seed42/task_0/checkpoints/global_step_10/actor
 ### Note: TASK_IDS can be comma-separated (e.g., "0,1,2") or space-separated (e.g., "0 1 2")
 ###       IMPORTANT: Order matters! Tasks are trained in the exact order provided
 ###       Tasks are trained sequentially, with each task loading from the previous one
@@ -28,12 +29,17 @@
 ###       RUN_ID is optional - if not provided, uses task sequence (e.g., "0_1_2") to identify the sequence run
 ###       MAX_EPOCH is optional and can override the default max_epochs for all tasks
 ###       SEED is optional and defaults to 1234 if not provided
+###       INIT_CHECKPOINT is optional; if provided, the first task will load from this checkpoint instead of the base model
+###         - If INIT_CHECKPOINT follows the standard path pattern
+###           (.../task_<N>/checkpoints/global_step_<M>/actor), the RUN_ID
+###           and log folder will be suffixed with `_from_task_<N>_step_<M>`
 
 TASK_IDS_STR=$1
 RUN_ID=$2
 MAX_EPOCH=$3
 CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 SEED=${5:-1234}
+INIT_CHECKPOINT=$6
 
 if [ -z "$TASK_IDS_STR" ]; then
     echo "ERROR: Missing required argument"
@@ -64,9 +70,26 @@ done
 # Create task sequence string for directory names
 TASK_SEQ_STR=$(IFS='_'; echo "${TASK_IDS_ARRAY[*]}")
 
+if [ -n "$INIT_CHECKPOINT" ] && [ ! -d "$INIT_CHECKPOINT" ]; then
+    echo "  ERROR: INIT_CHECKPOINT directory not found at: $INIT_CHECKPOINT"
+    exit 1
+fi
+
 # Generate RUN_ID if not provided (use task sequence)
 if [ -z "$RUN_ID" ]; then
     RUN_ID="seq_${TASK_SEQ_STR}"
+fi
+
+# If we have an INIT_CHECKPOINT, try to extract source task and step to
+# augment the RUN_ID/log folder name (mirrors EWC naming convention)
+if [ -n "$INIT_CHECKPOINT" ]; then
+    if [[ "$INIT_CHECKPOINT" =~ task_([0-9]+) ]]; then
+        SOURCE_TASK="${BASH_REMATCH[1]}"
+        if [[ "$INIT_CHECKPOINT" =~ global_step_([0-9]+) ]]; then
+            SOURCE_STEP="${BASH_REMATCH[1]}"
+            RUN_ID="${RUN_ID}_from_task_${SOURCE_TASK}_step_${SOURCE_STEP}"
+        fi
+    fi
 fi
 
 # Print job information
@@ -92,7 +115,7 @@ echo "  Config Name: $CONFIG_NAME"
 
 if [ -n "$MAX_EPOCH" ]; then
     if ! [[ "$MAX_EPOCH" =~ ^[0-9]+$ ]] || [ "$MAX_EPOCH" -le 0 ]; then
-        echo "  ERROR: MAX_EPOCH must be a positive integer, got: $MAX_EPOCH"
+          echo "  ERROR: MAX_EPOCH must be a positive integer, got: $MAX_EPOCH"
         exit 1
     fi
     echo "  Max epochs per task: $MAX_EPOCH"
@@ -143,8 +166,14 @@ for i in "${!TASK_IDS_ARRAY[@]}"; do
     
     # Determine checkpoint path
     if [ $TASK_NUM -eq 1 ]; then
-        CHECKPOINT_PATH=""
-        echo "  Loading from: Base model (SFT checkpoint) - First task in sequence"
+        if [ -n "$INIT_CHECKPOINT" ]; then
+            CHECKPOINT_PATH="$INIT_CHECKPOINT"
+            echo "  Loading from: Initial checkpoint (provided via argument)"
+            echo "  Checkpoint path: $CHECKPOINT_PATH"
+        else
+            CHECKPOINT_PATH=""
+            echo "  Loading from: Base model (SFT checkpoint) - First task in sequence"
+        fi
     else
         CHECKPOINT_PATH="$PREV_CHECKPOINT_PATH"
         if [ ! -d "$CHECKPOINT_PATH" ]; then

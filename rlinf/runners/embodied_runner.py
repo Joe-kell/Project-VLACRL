@@ -116,7 +116,8 @@ class EmbodiedRunner:
 
                 # actor training.
                 with self.timer("actor_training"):
-                    actor_training_futures = self.actor.run_training()
+                    is_last_step = (_step == self.max_steps - 1)
+                    actor_training_futures = self.actor.run_training(is_last_step=is_last_step)
                     actor_training_metrics = actor_training_futures.wait()
 
                 self.global_step += 1
@@ -147,6 +148,18 @@ class EmbodiedRunner:
             self.metric_logger.log(training_metrics, _step)
 
         self.metric_logger.finish()
+        
+        # Compute and save EWC data if enabled
+        if self.cfg.algorithm.get("use_ewc", False):
+            ewc_save_path = os.path.join(
+                self.cfg.runner.logger.log_path,
+                "ewc_data.pt"
+            )
+
+            # Delegate EWC saving to the actor worker group (runs on training ranks)
+            if hasattr(self.actor, "compute_and_save_ewc_data"):
+                futures = self.actor.compute_and_save_ewc_data(ewc_save_path)
+                futures.wait()
 
     def _save_checkpoint(self):
         base_output_dir = os.path.join(

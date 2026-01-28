@@ -1,0 +1,288 @@
+"""
+Elastic Weight Consolidation (EWC) for Continual Learning with LoRA.
+
+This module implements EWC regularization on top of LoRA adapters to prevent
+catastrophic forgetting when training on sequential tasks.
+"""
+
+import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict, Tuple
+
+
+def get_lora_parameters(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """
+    Extract LoRA parameters from model.
+    
+    Args:
+        model: Model with LoRA adapters (may be wrapped in FSDP)
+        
+    Returns:
+        Dictionary mapping parameter names to tensors (on CPU)
+    """
+    lora_params = {}
+    
+    # Handle FSDP wrapping - get the underlying model
+    if hasattr(model, 'module'):
+        model_to_check = model.module
+    else:
+        model_to_check = model
+    
+    # Get all parameters and filter for LoRA
+    for name, param in model_to_check.named_parameters():
+        if 'lora' in name.lower() and param.requires_grad:
+            # Clone to CPU to avoid device issues
+            lora_params[name] = param.data.detach().cpu().clone()
+    
+    return lora_params
+
+
+def compute_fisher_information_from_rollout(
+    model: nn.Module,
+    rollout_batch: Dict[str, torch.Tensor],
+    num_samples: int = 100,
+    device: str = "cuda",
+) -> Dict[str, torch.Tensor]:
+    """
+    Compute Fisher Information Matrix for LoRA parameters using rollout batch data.
+    
+    Fisher Information F_i = E[(∇_θ log p(y|x, θ))^2]
+    Approximated using empirical estimate over samples from rollout batch.
+    
+    Args:
+        model: Model with LoRA adapters
+        rollout_batch: Dictionary containing rollout data with keys:
+            - input_ids: [batch_size, seq_len]
+            - attention_mask: [batch_size, seq_len]
+            - pixel_values: [batch_size, ...]
+            - action_tokens: [batch_size, action_len] (ground truth actions)
+        num_samples: Number of samples to use for estimation
+        device: Device to compute on
+        
+    Returns:
+        Dictionary mapping parameter names to Fisher information values (on CPU)
+    """
+    model.eval()
+    fisher_dict = {}
+    
+    # Get LoRA parameters
+    lora_params = {}
+    for name, param in model.named_parameters():
+        if 'lora' in name.lower() and param.requires_grad:
+            lora_params[name] = param
+            fisher_dict[name] = torch.zeros_like(param.data, device='cpu')
+    
+    if len(lora_params) == 0:
+        raise ValueError("No LoRA parameters found for Fisher information computation")
+    
+    # Sample from rollout batch
+    batch_size = rollout_batch["input_ids"].shape[0]
+    num_samples = min(num_samples, batch_size)
+    
+    # Randomly sample indices
+    indices = torch.randperm(batch_size, device=device)[:num_samples]
+    
+    # Extract samples
+    sample_input_ids = rollout_batch["input_ids"][indices].to(device)
+    sample_attention_mask = rollout_batch.get("attention_mask", None)
+    if sample_attention_mask is not None:
+        sample_attention_mask = sample_attention_mask[indices].to(device)
+    sample_pixel_values = rollout_batch.get("pixel_values", None)
+    if sample_pixel_values is not None:
+        sample_pixel_values = sample_pixel_values[indices].to(device)
+    
+    # Get action tokens (ground truth) for computing log-likelihood
+    sample_action_tokens = rollout_batch.get("action_tokens", None)
+    if sample_action_tokens is not None:
+        sample_action_tokens = sample_action_tokens[indices].to(device)
+    
+    # Compute Fisher information
+    model.zero_grad()
+    
+    # Use custom_forward from model_utils to match training behavior
+    from rlinf.models.embodiment.model_utils import custom_forward
+    
+    # Get action_token_len from rollout batch or model
+    action_token_len = rollout_batch.get("action_tokens", None)
+    if action_token_len is not None:
+        action_token_len = action_token_len.shape[-1]  # Get action length from shape
+    else:
+        # Fallback: try to get from model
+        if hasattr(model, 'action_dim') and hasattr(model, 'num_action_chunks'):
+            action_token_len = model.action_dim * model.num_action_chunks
+        else:
+            # Try to get from wrapped model
+            model_to_check = model.module if hasattr(model, 'module') else model
+            if hasattr(model_to_check, 'action_dim') and hasattr(model_to_check, 'num_action_chunks'):
+                action_token_len = model_to_check.action_dim * model_to_check.num_action_chunks
+            else:
+                raise ValueError("Cannot determine action_token_len for Fisher computation")
+    
+    # Forward pass using custom_forward (matches training)
+    output_dict = custom_forward(
+        model,
+        input_ids=sample_input_ids,
+        attention_mask=sample_attention_mask,
+        pixel_values=sample_pixel_values,
+        output_hidden_states=False,
+        action_token_len=action_token_len,
+        value_model=False,
+        value_head_mode=None,
+        logits_processor=None,  # We don't need processing for Fisher computation
+        temperature=1.0,
+        top_k=-1,
+        logits_processor_args=None,
+        has_bc_batch=False,
+    )
+    
+    # Get raw logits from output_dict
+    raw_logits = output_dict.get("raw_logits", None)
+    if raw_logits is None:
+        # Fallback to intermediate_logits
+        raw_logits = output_dict.get("intermediate_logits", None)
+    
+    if raw_logits is None:
+        raise ValueError("Could not find logits in model output for Fisher computation")
+    
+    # Compute log-likelihood of ground truth actions
+    if sample_action_tokens is not None:
+        # raw_logits: [batch_size, action_len, vocab_size]
+        # sample_action_tokens: [batch_size, action_len]
+        
+        # Reshape for cross-entropy
+        raw_logits_flat = raw_logits.reshape(-1, raw_logits.shape[-1])  # [batch_size * action_len, vocab_size]
+        action_tokens_flat = sample_action_tokens.reshape(-1)  # [batch_size * action_len]
+        
+        # Compute log-likelihood
+        log_probs = F.log_softmax(raw_logits_flat, dim=-1)
+        log_likelihood = log_probs.gather(1, action_tokens_flat.unsqueeze(1)).squeeze(1)
+        
+        # Negative log-likelihood as loss (for gradient computation)
+        loss = -log_likelihood.mean()
+    else:
+        # Fallback: use log-probability of the model's predictions
+        log_probs = F.log_softmax(raw_logits, dim=-1)
+        # Sample from the distribution
+        probs = F.softmax(raw_logits, dim=-1)
+        sampled_tokens = torch.multinomial(probs.view(-1, probs.shape[-1]), 1).view(probs.shape[:-1])
+        log_likelihood = log_probs.gather(-1, sampled_tokens.unsqueeze(-1)).squeeze(-1)
+        loss = -log_likelihood.mean()
+    
+    # Backward pass to get gradients
+    loss.backward()
+    
+    # Accumulate squared gradients (Fisher information estimate)
+    for name, param in lora_params.items():
+        if param.grad is not None:
+            # Move to CPU and accumulate
+            grad_sq = (param.grad.data ** 2).cpu()
+            fisher_dict[name] += grad_sq
+    
+    # Average over samples
+    for name in fisher_dict:
+        fisher_dict[name] /= num_samples
+    
+    # Clean up gradients
+    model.zero_grad()
+    model.train()
+    
+    return fisher_dict
+
+
+def compute_ewc_loss(
+    model: nn.Module,
+    fisher_dict: Dict[str, torch.Tensor],
+    old_params: Dict[str, torch.Tensor],
+    lambda_ewc: float = 1.0,
+) -> torch.Tensor:
+    """
+    Compute EWC regularization loss.
+    
+    L_EWC = λ * Σ_i F_i * (θ_i - θ_i*)^2
+    where F_i is Fisher info, θ_i* is old parameter value, λ is importance weight.
+    
+    Args:
+        model: Current model with LoRA adapters
+        fisher_dict: Dictionary of Fisher information values (on CPU)
+        old_params: Dictionary of previous task's optimal parameters (on CPU)
+        lambda_ewc: EWC regularization weight
+        
+    Returns:
+        EWC loss tensor (on same device as model)
+    """
+    device = next(model.parameters()).device
+    ewc_loss = torch.tensor(0.0, device=device)
+    
+    # Get current LoRA parameters - use same logic as get_lora_parameters for name consistency
+    current_params = {}
+    # Handle FSDP wrapping - get the underlying model (same as get_lora_parameters)
+    if hasattr(model, 'module'):
+        model_to_check = model.module
+    else:
+        model_to_check = model
+    
+    for name, param in model_to_check.named_parameters():
+        if 'lora' in name.lower() and param.requires_grad:
+            current_params[name] = param
+    
+    # Compute EWC loss
+    for name in current_params:
+        if name in fisher_dict and name in old_params:
+            fisher = fisher_dict[name].to(device)
+            old_param = old_params[name].to(device)
+            current_param = current_params[name]
+            
+            # Ensure shapes match (important for FSDP)
+            if (current_param.shape == old_param.shape and 
+                current_param.shape == fisher.shape):
+                diff = current_param - old_param
+                ewc_loss += (fisher * (diff ** 2)).sum()
+    
+    return lambda_ewc * ewc_loss
+
+
+def save_ewc_data(
+    fisher_dict: Dict[str, torch.Tensor],
+    old_params: Dict[str, torch.Tensor],
+    save_path: str,
+):
+    """
+    Save EWC data (Fisher info and old parameters) to disk.
+    
+    Note: fisher_dict should already be accumulated from all previous tasks
+    (accumulation happens in the runner before calling this function).
+    
+    Args:
+        fisher_dict: Dictionary of accumulated Fisher information values (from all tasks)
+        old_params: Dictionary of current task's optimal parameters (only immediate previous)
+        save_path: Path to save the EWC data
+    """
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    torch.save({
+        'fisher_dict': fisher_dict,
+        'old_params': old_params,
+    }, save_path)
+    print(f"Saved EWC data to {save_path}")
+
+
+def load_ewc_data(load_path: str) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """
+    Load EWC data from disk.
+    
+    Args:
+        load_path: Path to load the EWC data from
+        
+    Returns:
+        Tuple of (fisher_dict, old_params)
+    """
+    if not os.path.exists(load_path):
+        raise FileNotFoundError(f"EWC data not found at {load_path}")
+    
+    data = torch.load(load_path, map_location='cpu')
+    fisher_dict = data['fisher_dict']
+    old_params = data['old_params']
+    print(f"Loaded EWC data from {load_path}")
+    
+    return fisher_dict, old_params

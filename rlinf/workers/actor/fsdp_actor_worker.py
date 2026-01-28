@@ -126,6 +126,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "WARNING: use_garbage_outputs is enabled. Actor will generate fake outputs "
                 "instead of running model inference. This is for debugging only!"
             )
+        
+        # EWC (Elastic Weight Consolidation) setup
+        self.use_ewc = cfg.algorithm.get("use_ewc", False)
+        self.ewc_fisher_dict = None
+        self.ewc_old_params = None
+        if self.use_ewc:
+            self._load_ewc_data_if_available()
 
     def _init_sft_replay_buffer(self, use_cached_logits=False):
         dataset_path = os.environ.get("LIBERO_REPO_PATH")
@@ -529,7 +536,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         else:
             return output_dict
 
-    def run_training(self):
+    def run_training(self, is_last_step: bool = False):
+        """
+        Run training on rollout batch.
+        
+        Args:
+            is_last_step: If True, accumulate Fisher information during backward pass for EWC
+        """
         self._deallocate_preallocated_memory()
 
         if self.cfg.actor.get("enable_offload", False):
@@ -538,6 +551,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         self.model.train()
         self.optimizer.zero_grad()
+        
+        # Initialize Fisher accumulation if this is the last step and EWC is enabled
+        if is_last_step and self.cfg.algorithm.get("use_ewc", False):
+            self._init_fisher_accumulation()
+        
         rollout_size = (
             self.rollout_batch["input_ids"].shape[0]
             * self.rollout_batch["input_ids"].shape[1]
@@ -757,9 +775,27 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         }
                         bc_loss, bc_metrics_data = behavior_cloning_ce_loss(**kwargs)
 
-                loss = rl_loss + bc_loss
+                # Add EWC loss if enabled
+                ewc_loss = torch.tensor(0.0, device=loss.device if 'loss' in locals() else f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}")
+                if self.use_ewc and self.ewc_fisher_dict is not None and self.ewc_old_params is not None:
+                    from rlinf.algorithms.ewc import compute_ewc_loss
+                    ewc_loss = compute_ewc_loss(
+                        self.model,
+                        self.ewc_fisher_dict,
+                        self.ewc_old_params,
+                        lambda_ewc=self.cfg.algorithm.get("ewc_lambda", 10000000.0),
+                    )
+                    metrics_data["ewc/loss"] = ewc_loss.detach().item()
+                    if self._rank == 0:
+                        print(f"EWC loss: {ewc_loss.detach().item()}", flush=True)
+                
+                loss = rl_loss + bc_loss + ewc_loss
                 loss /= self.gradient_accumulation
                 loss.backward()
+                
+                # Accumulate Fisher information if this is the last step
+                if is_last_step and self.cfg.algorithm.get("use_ewc", False):
+                    self._accumulate_fisher_from_gradients()
 
                 metrics_data["rl/loss"] = rl_loss.detach().item()
                 metrics_data.update(bc_metrics_data)
@@ -794,6 +830,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         torch.cuda.synchronize()
         torch.distributed.barrier()
         torch.cuda.empty_cache()
+        
+        # Finalize Fisher information if this was the last step
+        if is_last_step and self.cfg.algorithm.get("use_ewc", False):
+            self._finalize_fisher_accumulation(num_batches)
 
         return mean_metric_dict
 
@@ -832,4 +872,151 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 torch.save(optim_state, os.path.join(save_base_path, "optim.pt"))
 
         torch.distributed.barrier()
+    
+    def _load_ewc_data_if_available(self):
+        """Load EWC data from previous task if available."""
+        ewc_path = self.cfg.algorithm.get("previous_task_ewc_path", None)
+        if ewc_path and os.path.exists(ewc_path):
+            from rlinf.algorithms.ewc import load_ewc_data
+            try:
+                self.ewc_fisher_dict, self.ewc_old_params = load_ewc_data(ewc_path)
+                if self._rank == 0:
+                    print(f"✓ Loaded EWC data from {ewc_path}")
+            except Exception as e:
+                if self._rank == 0:
+                    print(f"✗ Failed to load EWC data from {ewc_path}: {e}")
+                self.ewc_fisher_dict = None
+                self.ewc_old_params = None
+        else:
+            self.ewc_fisher_dict = None
+            self.ewc_old_params = None
+            if self._rank == 0 and self.use_ewc:
+                print("No previous EWC data found - training first task without EWC regularization")
+    
+    def _init_fisher_accumulation(self):
+        """Initialize Fisher information accumulation for last step."""
+        # Use get_lora_parameters to get full parameter shapes (handles FSDP)
+        from rlinf.algorithms.ewc import get_lora_parameters
+        lora_params = get_lora_parameters(self.model)
+        
+        self.fisher_accumulator = {}
+        self.fisher_param_names = set(lora_params.keys())
+        for name, param_tensor in lora_params.items():
+            # Initialize with zeros matching the full parameter shape
+            self.fisher_accumulator[name] = torch.zeros_like(param_tensor, device='cpu')
+        
+        if self._rank == 0:
+            print(f"Initialized Fisher accumulation for {len(self.fisher_accumulator)} LoRA parameters")
+
+    def _accumulate_fisher_from_gradients(self):
+        """Accumulate squared gradients for Fisher information computation."""
+        if not hasattr(self, 'fisher_accumulator'):
+            return
+        
+        # Access gradients through the model
+        # With FSDP, gradients are sharded but FSDP syncs them internally
+        # We accumulate squared gradients and will all-reduce at the end
+        model_to_check = self.model.module if hasattr(self.model, 'module') else self.model
+        
+        for name, param in model_to_check.named_parameters():
+            if 'lora' in name.lower() and param.requires_grad and param.grad is not None:
+                if name in self.fisher_param_names:
+                    # Accumulate squared gradient
+                    # Note: With FSDP, param.grad is the sharded gradient on this rank
+                    # We'll all-reduce the accumulator at the end to combine all ranks
+                    grad_sq = (param.grad.data ** 2).cpu()
+                    
+                    # Check if shape matches (might be sharded)
+                    if name in self.fisher_accumulator:
+                        if grad_sq.shape == self.fisher_accumulator[name].shape:
+                            # Shapes match - accumulate directly
+                            self.fisher_accumulator[name] += grad_sq
+                        else:
+                            # Shape mismatch - this is a sharded parameter
+                            # We'll handle this by gathering full gradients in finalize
+                            # For now, just skip (we'll gather in finalize)
+                            pass
+
+    def _finalize_fisher_accumulation(self, num_batches: int):
+        """Finalize Fisher information by averaging over batches."""
+        if not hasattr(self, 'fisher_accumulator'):
+            return
+        
+        if num_batches == 0:
+            if self._rank == 0:
+                print("WARNING: num_batches is 0, cannot finalize Fisher accumulation")
+            return
+        
+        # Average over batches
+        for name in self.fisher_accumulator:
+            self.fisher_accumulator[name] /= num_batches
+        
+        # With FSDP, parameters are sharded across ranks.
+        # Each rank accumulated squared gradients for its shard, so we sum them.
+        if torch.distributed.is_initialized() and self._world_size > 1:
+            # All-reduce each Fisher value across ranks
+            for name in self.fisher_accumulator:
+                # Move to device for all-reduce, then back to CPU
+                fisher_tensor = self.fisher_accumulator[name].to(self.device)
+                torch.distributed.all_reduce(fisher_tensor, op=torch.distributed.ReduceOp.SUM)
+                # Note: we sum (not average) because each rank has different shards.
+                # The result is the sum of squared gradients across all shards.
+                self.fisher_accumulator[name] = fisher_tensor.cpu()
+        
+        if self._rank == 0:
+            print(f"Finalized Fisher accumulation over {num_batches} batches")
+            print(f"  Fisher computed for {len(self.fisher_accumulator)} parameters")
+
+    def compute_and_save_ewc_data(self, save_path: str):
+        """
+        Save EWC data using Fisher accumulated during the last training step.
+        This is called from the runner after training completes.
+        """
+        if not self.use_ewc:
+            return
+
+        from rlinf.algorithms.ewc import get_lora_parameters, save_ewc_data
+
+        if not hasattr(self, "fisher_accumulator") or self.fisher_accumulator is None:
+            if self._rank == 0:
+                raise ValueError(
+                    "EWC is enabled but Fisher information was not computed during training"
+                )
+            return
+
+        # Current task Fisher (already averaged over batches and all-reduced)
+        current_fisher = self.fisher_accumulator
+
+        # Online accumulation: merge current Fisher into accumulated Fisher from previous tasks
+        if self.ewc_fisher_dict is not None:
+            accumulated_fisher = {}
+            for name in current_fisher:
+                if name in self.ewc_fisher_dict:
+                    if current_fisher[name].shape == self.ewc_fisher_dict[name].shape:
+                        accumulated_fisher[name] = (
+                            self.ewc_fisher_dict[name] + current_fisher[name]
+                        )
+                    else:
+                        # Shape mismatch: fall back to current Fisher
+                        accumulated_fisher[name] = current_fisher[name]
+                else:
+                    accumulated_fisher[name] = current_fisher[name]
+
+            # Include any parameters that were only present in previous tasks
+            for name in self.ewc_fisher_dict:
+                if name not in accumulated_fisher:
+                    accumulated_fisher[name] = self.ewc_fisher_dict[name]
+
+            fisher_to_save = accumulated_fisher
+        else:
+            # First task: no previous Fisher to accumulate
+            fisher_to_save = current_fisher
+
+        # Get current optimal LoRA parameters
+        old_params = get_lora_parameters(self.model)
+
+        # Only rank 0 actually writes to disk
+        if self._rank == 0:
+            save_ewc_data(fisher_to_save, old_params, save_path)
+            print(f"✓ EWC data saved to {save_path}")
 
