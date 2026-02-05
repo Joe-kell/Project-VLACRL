@@ -58,9 +58,6 @@ for STEP_NUM in "${STEP_NUMBERS[@]}"; do
     fi
 done
 
-# Get workspace root (SLURM_SUBMIT_DIR is the directory where sbatch was run from)
-cd $SLURM_SUBMIT_DIR
-WORKSPACE_ROOT=$(pwd)
 mkdir -p logs/slurm
 
 # Update SLURM job name to be more descriptive (based on CHECKPOINT_LOCATION)

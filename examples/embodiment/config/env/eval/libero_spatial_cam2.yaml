@@ -1,0 +1,74 @@
+simulator_type: libero
+task_suite_name: libero_spatial_cam2
+
+auto_reset: True
+ignore_terminations: True
+max_episode_steps: 512
+
+use_rel_reward: True
+reward_coef: 5.0
+only_eval: True
+
+seed: 0
+num_group: ${env.eval.num_envs}
+group_size: 1
+use_fixed_reset_state_ids: True
+num_images_in_input: 1
+
+num_envs: ${env.eval.num_envs}  # Override in main config via env.eval.num_envs
+eval_per_task: ${env.eval.eval_per_task}  # Override in main config (documentation: expected evaluations per task)
+fixed_task_ids: ${env.fixed_task_ids}  # Override in main config eval.fixed_task_ids
+
+video_cfg:
+  save_video: True
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  camera_heights: 256
+  camera_widths: 256
+  # Per-task camera overrides (10 tasks in Libero Spatial).
+  # Each entry is a small perturbation of the actual default agentview camera pose.
+  # Actual default (from libero_tabletop_manipulation.py): 
+  #   pos=[0.65861317, 0.0, 1.61035002], quat=[0.63801772, 0.30484972, 0.30484984, 0.63801772]
+  camera_overrides_per_task:
+    # task 0 (use actual default)
+    - agentview:
+        pos: [0.63861317, 0.00, 1.61035002]
+        quat: [0.63801772, 0.30484972, 0.30484984, 0.63801772]
+    # task 1
+    - agentview:
+        pos: [0.6586, 0.05, 1.6104]
+        quat: [0.638, 0.305, 0.304, 0.638]
+    # task 2
+    - agentview:
+        pos: [0.6586, -0.05, 1.6104]
+        quat: [0.638, 0.304, 0.305, 0.638]
+    # task 3
+    - agentview:
+        pos: [0.6786, 0.00, 1.6304]
+        quat: [0.637, 0.305, 0.305, 0.637]
+    # task 4 (reduced deviation for better base model performance)
+    - agentview:
+        pos: [0.659, 0.01, 1.611]
+        quat: [0.638, 0.305, 0.304, 0.638]
+    # task 5
+    - agentview:
+        pos: [0.6786, -0.06, 1.6304]
+        quat: [0.637, 0.304, 0.306, 0.637]
+    # task 6
+    - agentview:
+        pos: [0.6986, 0.00, 1.5904]
+        quat: [0.639, 0.304, 0.304, 0.639]
+    # task 7 (reduced deviation for better base model performance)
+    - agentview:
+        pos: [0.659, 0.00, 1.611]
+        quat: [0.638, 0.304, 0.305, 0.638]
+    # task 8 (reduced deviation for better base model performance)
+    - agentview:
+        pos: [0.658, 0.00, 1.610]
+        quat: [0.638, 0.305, 0.304, 0.638]
+    # task 9
+    - agentview:
+        pos: [0.6786, 0.00, 1.6104]
+        quat: [0.639, 0.305, 0.305, 0.639]

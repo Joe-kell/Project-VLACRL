@@ -50,8 +50,25 @@ else
     fi
 fi
 
+# Extract config tag from CONFIG_NAME
+# If config ends with _openvlaoft or _eval, don't set CONFIG_TAG
+# Otherwise, extract the part after the last _
+CONFIG_TAG=""
+if [[ ! "${CONFIG_NAME}" =~ _openvlaoft$ ]] && [[ ! "${CONFIG_NAME}" =~ _eval$ ]]; then
+    if [[ "${CONFIG_NAME}" =~ _([^_/]+)$ ]]; then
+        CONFIG_TAG="${BASH_REMATCH[1]}"
+    fi
+fi
+
+# Build log directory path with config tag if present
+# If LOG_DIR is already set (e.g., by mll_cluster scripts), use it as-is
+# Otherwise, create default path with config tag if present
 if [ -z "${LOG_DIR}" ]; then
-    LOG_DIR="${REPO_PATH}/logs/bcrl/run_$(date +'%Y%m%d-%H:%M:%S')" #/$(date +'%Y%m%d-%H:%M:%S')"
+    if [ -n "${CONFIG_TAG}" ]; then
+        LOG_DIR="${REPO_PATH}/logs_${CONFIG_TAG}/bcrl/run_$(date +'%Y%m%d-%H:%M:%S')"
+    else
+        LOG_DIR="${REPO_PATH}/logs/bcrl/run_$(date +'%Y%m%d-%H:%M:%S')"
+    fi
 fi
 MEGA_LOG_FILE="${LOG_DIR}/run_embodiment.log"
 mkdir -p "${LOG_DIR}"

@@ -176,6 +176,24 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         self.setup_model_and_optimizer()
 
+        # For EWC: capture the loaded model's LoRA parameters as old_params reference
+        # This is done AFTER setup_model_and_optimizer() which loads the LoRA checkpoint.
+        # Using the loaded weights directly avoids FSDP sharding issues with saved old_params.
+        if self.use_ewc and self.ewc_fisher_dict is not None:
+            from rlinf.algorithms.ewc import get_lora_parameters
+            loaded_params = get_lora_parameters(self.model)
+            if self._rank == 0:
+                print(f"[EWC] Capturing {len(loaded_params)} loaded LoRA parameters as old_params reference")
+                # Print sample for verification
+                sample_names = list(loaded_params.keys())[:3]
+                for name in sample_names:
+                    print(f"  {name}: {loaded_params[name].shape}, "
+                          f"mean={loaded_params[name].mean().item():.6e}")
+            
+            # Use loaded weights instead of whatever was in ewc_data.pt
+            # This ensures we regularize toward the actual loaded checkpoint weights
+            self.ewc_old_params = loaded_params
+
         # This default to using the base model without LoRA weights
         # Store reference model state dict if using reference logits BC loss
         self.ref_policy_state_dict = None
@@ -776,14 +794,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         bc_loss, bc_metrics_data = behavior_cloning_ce_loss(**kwargs)
 
                 # Add EWC loss if enabled
-                ewc_loss = torch.tensor(0.0, device=loss.device if 'loss' in locals() else f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}")
+                device = f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}"
+                ewc_loss = torch.tensor(0.0, device=device)
                 if self.use_ewc and self.ewc_fisher_dict is not None and self.ewc_old_params is not None:
                     from rlinf.algorithms.ewc import compute_ewc_loss
                     ewc_loss = compute_ewc_loss(
                         self.model,
                         self.ewc_fisher_dict,
                         self.ewc_old_params,
-                        lambda_ewc=self.cfg.algorithm.get("ewc_lambda", 10000000.0),
+                        lambda_ewc=self.cfg.algorithm.get("ewc_lambda", 1000000.0),
                     )
                     metrics_data["ewc/loss"] = ewc_loss.detach().item()
                     if self._rank == 0:
@@ -874,14 +893,52 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         torch.distributed.barrier()
     
     def _load_ewc_data_if_available(self):
-        """Load EWC data from previous task if available."""
+        """Load EWC Fisher information from previous task if available.
+        
+        NOTE: old_params is NOT loaded from file. It will be captured from the 
+        loaded checkpoint weights in init_worker() after setup_model_and_optimizer().
+        """
         ewc_path = self.cfg.algorithm.get("previous_task_ewc_path", None)
         if ewc_path and os.path.exists(ewc_path):
             from rlinf.algorithms.ewc import load_ewc_data
             try:
-                self.ewc_fisher_dict, self.ewc_old_params = load_ewc_data(ewc_path)
+                self.ewc_fisher_dict = load_ewc_data(ewc_path)
+                self.ewc_old_params = None  # Will be set in init_worker from loaded checkpoint
+                
+                # Maximum Fisher value (should match max_grad_norm^2)
+                max_fisher_value = 100.0 ** 2  # 10000
+                
+                # Validate and clean loaded Fisher data for NaN/inf
+                if self.ewc_fisher_dict is not None:
+                    cleaned_count = 0
+                    for name in list(self.ewc_fisher_dict.keys()):
+                        fisher_val = self.ewc_fisher_dict[name]
+                        if torch.isnan(fisher_val).any() or torch.isinf(fisher_val).any():
+                            if self._rank == 0:
+                                print(f"✗ WARNING: Fisher information contains NaN/Inf for '{name}'. "
+                                      f"Replacing with max value {max_fisher_value} (indicating high importance).")
+                            # Replace NaN/Inf with max_fisher_value (not zero!)
+                            self.ewc_fisher_dict[name] = torch.nan_to_num(
+                                fisher_val, 
+                                nan=max_fisher_value, 
+                                posinf=max_fisher_value, 
+                                neginf=0.0
+                            )
+                            cleaned_count += 1
+                        
+                        # Clip to max value
+                        self.ewc_fisher_dict[name] = torch.clamp(
+                            self.ewc_fisher_dict[name], max=max_fisher_value
+                        )
+                    
+                    if self._rank == 0 and cleaned_count > 0:
+                        print(f"  Cleaned {cleaned_count} Fisher parameters with NaN/Inf values "
+                              f"(replaced with max value {max_fisher_value})")
+                
                 if self._rank == 0:
-                    print(f"✓ Loaded EWC data from {ewc_path}")
+                    print(f"✓ Loaded EWC Fisher data from {ewc_path}")
+                    print(f"  Fisher dict: {len(self.ewc_fisher_dict)} parameters")
+                    print(f"  (old_params will be captured from loaded checkpoint in init_worker)")
             except Exception as e:
                 if self._rank == 0:
                     print(f"✗ Failed to load EWC data from {ewc_path}: {e}")
@@ -913,28 +970,42 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if not hasattr(self, 'fisher_accumulator'):
             return
         
+        # Maximum gradient norm to prevent overflow when squaring
+        # If gradient norm exceeds this, clip before squaring
+        max_grad_norm = 100.0
+        max_fisher_value = max_grad_norm ** 2  # Maximum Fisher value (100^2 = 10000)
+        
         # Access gradients through the model
-        # With FSDP, gradients are sharded but FSDP syncs them internally
-        # We accumulate squared gradients and will all-reduce at the end
         model_to_check = self.model.module if hasattr(self.model, 'module') else self.model
         
         for name, param in model_to_check.named_parameters():
             if 'lora' in name.lower() and param.requires_grad and param.grad is not None:
                 if name in self.fisher_param_names:
-                    # Accumulate squared gradient
-                    # Note: With FSDP, param.grad is the sharded gradient on this rank
-                    # We'll all-reduce the accumulator at the end to combine all ranks
-                    grad_sq = (param.grad.data ** 2).cpu()
+                    # Get gradient and clip to prevent overflow when squaring
+                    grad = param.grad.data
+                    
+                    # Clip gradients to prevent overflow when squaring
+                    grad_norm = grad.norm()
+                    if grad_norm > max_grad_norm:
+                        grad = grad * (max_grad_norm / grad_norm)
+                    
+                    # Square the gradient
+                    grad_sq = (grad ** 2).cpu()
+                    
+                    # Additional safety: clip any values that somehow became inf
+                    grad_sq = torch.clamp(grad_sq, max=max_fisher_value)
                     
                     # Check if shape matches (might be sharded)
                     if name in self.fisher_accumulator:
                         if grad_sq.shape == self.fisher_accumulator[name].shape:
                             # Shapes match - accumulate directly
                             self.fisher_accumulator[name] += grad_sq
+                            # Clip accumulator to prevent accumulation of inf
+                            self.fisher_accumulator[name] = torch.clamp(
+                                self.fisher_accumulator[name], max=max_fisher_value
+                            )
                         else:
-                            # Shape mismatch - this is a sharded parameter
-                            # We'll handle this by gathering full gradients in finalize
-                            # For now, just skip (we'll gather in finalize)
+                            # Shape mismatch - skip for now
                             pass
 
     def _finalize_fisher_accumulation(self, num_batches: int):
@@ -947,20 +1018,65 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 print("WARNING: num_batches is 0, cannot finalize Fisher accumulation")
             return
         
+        # Maximum Fisher value (should match max_grad_norm^2 from accumulation)
+        max_fisher_value = 100.0 ** 2  # 10000
+        
         # Average over batches
         for name in self.fisher_accumulator:
+            # Check for inf/nan before averaging and replace with max value
+            if torch.isnan(self.fisher_accumulator[name]).any() or torch.isinf(self.fisher_accumulator[name]).any():
+                if self._rank == 0:
+                    print(f"WARNING: Fisher accumulator for '{name}' contains NaN/Inf before averaging. "
+                          f"Replacing with max value {max_fisher_value}.")
+                # Replace NaN/Inf with max_fisher_value (not zero!)
+                self.fisher_accumulator[name] = torch.nan_to_num(
+                    self.fisher_accumulator[name], 
+                    nan=max_fisher_value, 
+                    posinf=max_fisher_value, 
+                    neginf=0.0  # Negative inf should be 0 (shouldn't happen for squared values)
+                )
+            
             self.fisher_accumulator[name] /= num_batches
+            
+            # Clip after averaging to ensure no values exceed max
+            self.fisher_accumulator[name] = torch.clamp(
+                self.fisher_accumulator[name], max=max_fisher_value
+            )
         
         # With FSDP, parameters are sharded across ranks.
-        # Each rank accumulated squared gradients for its shard, so we sum them.
         if torch.distributed.is_initialized() and self._world_size > 1:
-            # All-reduce each Fisher value across ranks
             for name in self.fisher_accumulator:
-                # Move to device for all-reduce, then back to CPU
                 fisher_tensor = self.fisher_accumulator[name].to(self.device)
+                
+                # Check for inf/nan before all-reduce and replace with max value
+                if torch.isnan(fisher_tensor).any() or torch.isinf(fisher_tensor).any():
+                    if self._rank == 0:
+                        print(f"WARNING: Fisher tensor for '{name}' contains NaN/Inf before all-reduce. "
+                              f"Replacing with max value {max_fisher_value}.")
+                    fisher_tensor = torch.nan_to_num(
+                        fisher_tensor, 
+                        nan=max_fisher_value, 
+                        posinf=max_fisher_value, 
+                        neginf=0.0
+                    )
+                
                 torch.distributed.all_reduce(fisher_tensor, op=torch.distributed.ReduceOp.SUM)
-                # Note: we sum (not average) because each rank has different shards.
-                # The result is the sum of squared gradients across all shards.
+                
+                # Check for inf/nan after all-reduce
+                if torch.isnan(fisher_tensor).any() or torch.isinf(fisher_tensor).any():
+                    if self._rank == 0:
+                        print(f"WARNING: Fisher tensor for '{name}' contains NaN/Inf after all-reduce. "
+                              f"Replacing with max value {max_fisher_value}.")
+                    fisher_tensor = torch.nan_to_num(
+                        fisher_tensor, 
+                        nan=max_fisher_value, 
+                        posinf=max_fisher_value, 
+                        neginf=0.0
+                    )
+                
+                # Clip to max value
+                fisher_tensor = torch.clamp(fisher_tensor, max=max_fisher_value)
+                
                 self.fisher_accumulator[name] = fisher_tensor.cpu()
         
         if self._rank == 0:
@@ -975,7 +1091,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if not self.use_ewc:
             return
 
-        from rlinf.algorithms.ewc import get_lora_parameters, save_ewc_data
+        from rlinf.algorithms.ewc import save_ewc_data
 
         if not hasattr(self, "fisher_accumulator") or self.fisher_accumulator is None:
             if self._rank == 0:
@@ -984,20 +1100,70 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
             return
 
+        # Maximum Fisher value (should match max_grad_norm^2)
+        max_fisher_value = 100.0 ** 2  # 10000
+
         # Current task Fisher (already averaged over batches and all-reduced)
         current_fisher = self.fisher_accumulator
+        
+        # Validate and clean current Fisher for NaN/inf
+        for name in list(current_fisher.keys()):
+            if torch.isnan(current_fisher[name]).any() or torch.isinf(current_fisher[name]).any():
+                if self._rank == 0:
+                    print(f"WARNING: Current Fisher for '{name}' contains NaN/Inf. "
+                          f"Replacing with max value {max_fisher_value}.")
+                current_fisher[name] = torch.nan_to_num(
+                    current_fisher[name], 
+                    nan=max_fisher_value, 
+                    posinf=max_fisher_value, 
+                    neginf=0.0
+                )
+            # Clip to max value
+            current_fisher[name] = torch.clamp(current_fisher[name], max=max_fisher_value)
 
         # Online accumulation: merge current Fisher into accumulated Fisher from previous tasks
         if self.ewc_fisher_dict is not None:
+            # First, validate and clean previous Fisher
+            for name in list(self.ewc_fisher_dict.keys()):
+                if torch.isnan(self.ewc_fisher_dict[name]).any() or torch.isinf(self.ewc_fisher_dict[name]).any():
+                    if self._rank == 0:
+                        print(f"WARNING: Previous Fisher for '{name}' contains NaN/Inf. "
+                              f"Replacing with max value {max_fisher_value}.")
+                    self.ewc_fisher_dict[name] = torch.nan_to_num(
+                        self.ewc_fisher_dict[name], 
+                        nan=max_fisher_value, 
+                        posinf=max_fisher_value, 
+                        neginf=0.0
+                    )
+                # Clip to max value
+                self.ewc_fisher_dict[name] = torch.clamp(
+                    self.ewc_fisher_dict[name], max=max_fisher_value
+                )
+            
             accumulated_fisher = {}
             for name in current_fisher:
                 if name in self.ewc_fisher_dict:
                     if current_fisher[name].shape == self.ewc_fisher_dict[name].shape:
-                        accumulated_fisher[name] = (
-                            self.ewc_fisher_dict[name] + current_fisher[name]
-                        )
+                        # Merge Fisher values
+                        merged = self.ewc_fisher_dict[name] + current_fisher[name]
+                        
+                        # Clip merged value to prevent overflow
+                        merged = torch.clamp(merged, max=max_fisher_value)
+                        
+                        # Check for inf/nan after merging (shouldn't happen after clamping)
+                        if torch.isnan(merged).any() or torch.isinf(merged).any():
+                            if self._rank == 0:
+                                print(f"WARNING: Merged Fisher for '{name}' contains NaN/Inf. "
+                                      "Using current Fisher only.")
+                            accumulated_fisher[name] = current_fisher[name]
+                        else:
+                            accumulated_fisher[name] = merged
                     else:
                         # Shape mismatch: fall back to current Fisher
+                        if self._rank == 0:
+                            print(f"WARNING: Shape mismatch for '{name}': "
+                                  f"previous={self.ewc_fisher_dict[name].shape}, "
+                                  f"current={current_fisher[name].shape}. Using current Fisher.")
                         accumulated_fisher[name] = current_fisher[name]
                 else:
                     accumulated_fisher[name] = current_fisher[name]
@@ -1005,18 +1171,47 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             # Include any parameters that were only present in previous tasks
             for name in self.ewc_fisher_dict:
                 if name not in accumulated_fisher:
-                    accumulated_fisher[name] = self.ewc_fisher_dict[name]
+                    # Validate before including
+                    if torch.isnan(self.ewc_fisher_dict[name]).any() or torch.isinf(self.ewc_fisher_dict[name]).any():
+                        if self._rank == 0:
+                            print(f"WARNING: Previous-only Fisher for '{name}' contains NaN/Inf. "
+                                  f"Replacing with max value {max_fisher_value}.")
+                        self.ewc_fisher_dict[name] = torch.nan_to_num(
+                            self.ewc_fisher_dict[name], 
+                            nan=max_fisher_value, 
+                            posinf=max_fisher_value, 
+                            neginf=0.0
+                        )
+                    accumulated_fisher[name] = torch.clamp(
+                        self.ewc_fisher_dict[name], max=max_fisher_value
+                    )
 
             fisher_to_save = accumulated_fisher
         else:
             # First task: no previous Fisher to accumulate
             fisher_to_save = current_fisher
 
-        # Get current optimal LoRA parameters
-        old_params = get_lora_parameters(self.model)
+        # Final validation of Fisher to save
+        for name in list(fisher_to_save.keys()):
+            if torch.isnan(fisher_to_save[name]).any() or torch.isinf(fisher_to_save[name]).any():
+                if self._rank == 0:
+                    print(f"ERROR: Final Fisher for '{name}' still contains NaN/Inf after cleaning! "
+                          f"Replacing with max value {max_fisher_value}.")
+                fisher_to_save[name] = torch.nan_to_num(
+                    fisher_to_save[name], 
+                    nan=max_fisher_value, 
+                    posinf=max_fisher_value, 
+                    neginf=0.0
+                )
+            # Final clip
+            fisher_to_save[name] = torch.clamp(fisher_to_save[name], max=max_fisher_value)
 
         # Only rank 0 actually writes to disk
+        # NOTE: We only save Fisher information, not old_params.
+        # old_params is captured from the loaded checkpoint at the start of training
+        # in init_worker(), which avoids FSDP sharding issues.
         if self._rank == 0:
-            save_ewc_data(fisher_to_save, old_params, save_path)
+            print(f"[EWC] Saving {len(fisher_to_save)} Fisher parameters")
+            save_ewc_data(fisher_to_save, save_path)
             print(f"✓ EWC data saved to {save_path}")
 

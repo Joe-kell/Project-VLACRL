@@ -227,6 +227,11 @@ def compute_ewc_loss(
         if 'lora' in name.lower() and param.requires_grad:
             current_params[name] = param
     
+    # Track matching parameters for debugging
+    matched_params = 0
+    skipped_params = 0
+    skipped_reasons = []
+    
     # Compute EWC loss
     for name in current_params:
         if name in fisher_dict and name in old_params:
@@ -237,52 +242,122 @@ def compute_ewc_loss(
             # Ensure shapes match (important for FSDP)
             if (current_param.shape == old_param.shape and 
                 current_param.shape == fisher.shape):
+                # Additional validation: check for NaN/inf after moving to device
+                if torch.isnan(fisher).any() or torch.isinf(fisher).any():
+                    skipped_reasons.append(f"{name}: Fisher has NaN/Inf after device transfer")
+                    skipped_params += 1
+                    continue
+                if torch.isnan(old_param).any() or torch.isinf(old_param).any():
+                    skipped_reasons.append(f"{name}: old_param has NaN/Inf after device transfer")
+                    skipped_params += 1
+                    continue
+                if torch.isnan(current_param).any() or torch.isinf(current_param).any():
+                    skipped_reasons.append(f"{name}: current_param has NaN/Inf")
+                    skipped_params += 1
+                    continue
+                
                 diff = current_param - old_param
-                ewc_loss += (fisher * (diff ** 2)).sum()
+                contribution = (fisher * (diff ** 2)).sum()
+                
+                # Check if contribution is NaN/inf
+                if torch.isnan(contribution) or torch.isinf(contribution):
+                    skipped_reasons.append(f"{name}: EWC contribution is NaN/Inf")
+                    skipped_params += 1
+                    continue
+                
+                ewc_loss += contribution
+                matched_params += 1
+            else:
+                skipped_params += 1
+                skipped_reasons.append(
+                    f"{name}: shape mismatch (current={current_param.shape}, "
+                    f"old={old_param.shape}, fisher={fisher.shape})"
+                )
+        else:
+            skipped_params += 1
+            missing = []
+            if name not in fisher_dict:
+                missing.append("fisher_dict")
+            if name not in old_params:
+                missing.append("old_params")
+            skipped_reasons.append(f"{name}: missing in {', '.join(missing)}")
+    
+    # Debug output (only print on rank 0 if available)
+    import os
+    rank = int(os.environ.get("LOCAL_RANK", 0))
+    if rank == 0:
+        # Always print matching stats for first few calls to help debug
+        print(f"[EWC] Parameter matching: matched={matched_params}, skipped={skipped_params}, "
+              f"current={len(current_params)}, fisher={len(fisher_dict)}, old={len(old_params)}")
+        
+        if matched_params == 0 and len(current_params) > 0:
+            print(f"[EWC] WARNING: No parameters matched! EWC will have no effect.")
+            # Print sample keys to help diagnose naming issues
+            sample_current = list(current_params.keys())[:2]
+            sample_fisher = list(fisher_dict.keys())[:2]
+            sample_old = list(old_params.keys())[:2]
+            print(f"[EWC] Sample current param names: {sample_current}")
+            print(f"[EWC] Sample fisher dict names: {sample_fisher}")
+            print(f"[EWC] Sample old_params names: {sample_old}")
+            
+        if len(skipped_reasons) > 0 and matched_params < len(current_params):
+            print(f"[EWC] First 5 skip reasons: {skipped_reasons[:5]}")
+    
+    # Final validation: check if ewc_loss is NaN/inf
+    if torch.isnan(ewc_loss) or torch.isinf(ewc_loss):
+        import os
+        rank = int(os.environ.get("LOCAL_RANK", 0))
+        if rank == 0:
+            print(f"ERROR: EWC loss is NaN/Inf! Matched params: {matched_params}, "
+                  f"Skipped params: {skipped_params}")
+            if len(skipped_reasons) > 0:
+                print(f"Skipped reasons: {skipped_reasons[:5]}")
+        # Return zero loss instead of NaN to prevent training crash
+        ewc_loss = torch.tensor(0.0, device=device)
     
     return lambda_ewc * ewc_loss
 
 
 def save_ewc_data(
     fisher_dict: Dict[str, torch.Tensor],
-    old_params: Dict[str, torch.Tensor],
     save_path: str,
 ):
     """
-    Save EWC data (Fisher info and old parameters) to disk.
+    Save EWC Fisher information to disk.
     
-    Note: fisher_dict should already be accumulated from all previous tasks
-    (accumulation happens in the runner before calling this function).
+    Note: We only save Fisher information, not old_params. The old_params reference
+    is captured from the loaded checkpoint weights at the start of training, which
+    avoids FSDP sharding issues and ensures we regularize toward the exact loaded weights.
     
     Args:
         fisher_dict: Dictionary of accumulated Fisher information values (from all tasks)
-        old_params: Dictionary of current task's optimal parameters (only immediate previous)
         save_path: Path to save the EWC data
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save({
         'fisher_dict': fisher_dict,
-        'old_params': old_params,
     }, save_path)
-    print(f"Saved EWC data to {save_path}")
+    print(f"Saved EWC Fisher data to {save_path}")
 
 
-def load_ewc_data(load_path: str) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+def load_ewc_data(load_path: str) -> Dict[str, torch.Tensor]:
     """
-    Load EWC data from disk.
+    Load EWC Fisher information from disk.
+    
+    Note: old_params is no longer saved/loaded. The reference weights for EWC
+    regularization are captured from the loaded checkpoint at the start of training.
     
     Args:
         load_path: Path to load the EWC data from
         
     Returns:
-        Tuple of (fisher_dict, old_params)
+        fisher_dict: Dictionary of Fisher information values
     """
     if not os.path.exists(load_path):
         raise FileNotFoundError(f"EWC data not found at {load_path}")
     
     data = torch.load(load_path, map_location='cpu')
     fisher_dict = data['fisher_dict']
-    old_params = data['old_params']
-    print(f"Loaded EWC data from {load_path}")
+    print(f"Loaded EWC Fisher data from {load_path}")
     
-    return fisher_dict, old_params
+    return fisher_dict

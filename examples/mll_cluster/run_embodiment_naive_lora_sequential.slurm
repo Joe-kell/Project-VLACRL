@@ -9,7 +9,7 @@
 #SBATCH --partition=mll                 # Partition name (adjust to your cluster's partition)
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=jiahengh@utexas.edu
-#SBATCH --exclude=slurm-node-008,slurm-node-011
+#SBATCH --exclude=slurm-node-008,slurm-node-011,slurm-node-004
 #SBATCH --output=logs/slurm/%x-%j.out              # Output file name (%x = job name, %j = job ID)
 #SBATCH --error=logs/slurm/%x-%j.err               # Error file name
 
@@ -40,6 +40,13 @@ MAX_EPOCH=$3
 CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 SEED=${5:-1234}
 INIT_CHECKPOINT=$6
+
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
 
 if [ -z "$TASK_IDS_STR" ]; then
     echo "ERROR: Missing required argument"
@@ -126,8 +133,6 @@ echo "  Evaluation: After each task completes training"
 echo "========================================="
 echo ""
 
-cd $SLURM_SUBMIT_DIR
-
 # Main sequential training loop
 OVERALL_EXIT_CODE=0
 PREV_CHECKPOINT_PATH=""
@@ -145,15 +150,25 @@ for i in "${!TASK_IDS_ARRAY[@]}"; do
     
     # Create task-specific log directory with run_id and seed to reflect non-ordered runs
     TASK_LOG_DIR="./logs/naive_lora_sequential/${RUN_ID}_seed${SEED}/task_${TASK_ID}"
+    # Inject config tag into TASK_LOG_DIR before exporting
+    TASK_LOG_DIR=$(inject_config_tag_into_log_path "$TASK_LOG_DIR" "$CONFIG_TAG")
     mkdir -p "${TASK_LOG_DIR}"
     export LOG_DIR="${TASK_LOG_DIR}"
     
     # Set experiment name based on LOG_DIR (for wandb)
     EXPERIMENT_NAME=$(basename "$TASK_LOG_DIR")
+    # Append CONFIG_TAG to experiment name if set
+    if [ -n "$CONFIG_TAG" ]; then
+        EXPERIMENT_NAME="${EXPERIMENT_NAME}_${CONFIG_TAG}"
+    fi
     
     # Update SLURM job name (only for first task to avoid spam)
     if [ $TASK_NUM -eq 1 ] && command -v scontrol &> /dev/null && [ -n "$SLURM_JOB_ID" ]; then
-        scontrol update job=$SLURM_JOB_ID name="seq_${RUN_ID}_tasks_${TASK_SEQ_STR}" 2>/dev/null || true
+        JOB_NAME="seq_${RUN_ID}_tasks_${TASK_SEQ_STR}"
+        if [ -n "$CONFIG_TAG" ]; then
+            JOB_NAME="${JOB_NAME}_${CONFIG_TAG}"
+        fi
+        scontrol update job=$SLURM_JOB_ID name="${JOB_NAME}" 2>/dev/null || true
     fi
     
     echo "Configuration:"
@@ -195,7 +210,6 @@ for i in "${!TASK_IDS_ARRAY[@]}"; do
     # Build Hydra overrides
     OVERRIDES="env.fixed_task_ids=[${TASK_ID}] \
     	runner.logger.experiment_name=${EXPERIMENT_NAME} \
-    	actor.checkpoint_save_path=${TASK_LOG_DIR} \
     	actor.seed=${SEED}"
     
     if [ -n "$CHECKPOINT_PATH" ]; then
@@ -234,11 +248,12 @@ for i in "${!TASK_IDS_ARRAY[@]}"; do
     echo "========================================="
     
     # Run evaluation after each task
+    # TASK_LOG_DIR already has the config tag injected, so use it directly
     CHECKPOINT_LOCATION=$(echo "$TASK_LOG_DIR" | sed 's|^\./||')
     echo ""
     echo "Running evaluation for task $TASK_ID..."
     echo "Checkpoint location: ${CHECKPOINT_LOCATION}"
-    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}"
+        bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "" "${EVAL_CONFIG_NAME}"
     
     EVAL_EXIT_CODE=$?
     if [ $EVAL_EXIT_CODE -ne 0 ]; then

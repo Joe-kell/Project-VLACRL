@@ -21,10 +21,8 @@ if [ -z "$STEP_NUMBER" ]; then
     STEP_NUMBER=10
 fi
 
-# Get workspace root (script directory's parent's parent)
-SCRIPT_DIR="$( cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )"
-WORKSPACE_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
-cd "$WORKSPACE_ROOT"
+# Get workspace root (assume we're already in the workspace root)
+WORKSPACE_ROOT=$(pwd)
 
 if [ -z "$CHECKPOINT_LOCATION" ] || [ -z "$TEMPERATURE" ]; then
     echo "ERROR: Missing required argument(s)"

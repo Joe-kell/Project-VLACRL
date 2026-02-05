@@ -26,6 +26,71 @@
 ###       MAX_EPOCH is optional and can override the default max_epochs
 ###       SEED is optional and defaults to 1234 if not provided
 
+TASK_IDS_STR=$1
+CHECKPOINT_PATH=$2
+MAX_EPOCH=$3
+CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
+SEED=${5:-1234}
+
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
+# Parse TASK_IDS: convert comma-separated to space-separated, then to array
+TASK_IDS_STR=$(echo "$TASK_IDS_STR" | tr ',' ' ')
+read -ra TASK_IDS_ARRAY <<< "$TASK_IDS_STR"
+
+# Sort task IDs and create formatted string for logging
+IFS=$'\n' sorted_task_ids=($(sort -n <<<"${TASK_IDS_ARRAY[*]}"))
+unset IFS
+TASK_DIR_STR=$(IFS='_'; echo "${sorted_task_ids[*]}")
+
+# Determine LOG_DIR based on checkpoint path (same logic as in bash script)
+if [ -n "$CHECKPOINT_PATH" ]; then
+    # Extract global_step from checkpoint path
+    # e.g., .../checkpoints/global_step_10/actor -> step_10
+    if [[ "$CHECKPOINT_PATH" =~ global_step_([0-9]+) ]]; then
+        SOURCE_STEP="${BASH_REMATCH[1]}"
+        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_step_${SOURCE_STEP}_seed${SEED}"
+    else
+        # Fallback: use a generic name
+        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_seed${SEED}"
+    fi
+else
+    # Standard case: use task IDs
+    LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_seed${SEED}"
+fi
+
+# Inject config tag into LOG_DIR before exporting
+if [ -n "$CONFIG_TAG" ]; then
+    # CONFIG_TAG is set, transform the path
+    LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
+    # Validate transformation result
+    if [ -z "$LOG_DIR_TRANSFORMED" ]; then
+        echo "  ERROR: Failed to transform LOG_DIR with config tag"
+        echo "         Original LOG_DIR: [$LOG_DIR]"
+        echo "         CONFIG_TAG: [$CONFIG_TAG]"
+        exit 1
+    fi
+    LOG_DIR="$LOG_DIR_TRANSFORMED"
+else
+    # CONFIG_TAG is empty, use path as-is (no transformation needed)
+    # This is valid - it means no config tag was specified
+    :
+fi
+
+# Validate LOG_DIR is not empty
+if [ -z "$LOG_DIR" ]; then
+    echo "  ERROR: LOG_DIR is empty after path construction"
+    exit 1
+fi
+
+# Export LOG_DIR so the bash script can use it
+export LOG_DIR
+
 # Call the shared script with all arguments (path relative to workspace root)
 bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh "$@"
 
@@ -58,7 +123,9 @@ if [ $TRAINING_EXIT_CODE -eq 0 ]; then
         LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_seed${SEED}"
     fi
     
-    CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
+    # Reuse CONFIG_TAG and EVAL_CONFIG_NAME from earlier (already computed above)
+    # Inject config tag into LOG_DIR before using it
+    LOG_DIR=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
     
     # Skip evaluation if using test config
     if [[ "$CONFIG_NAME" == *"test"* ]] || [[ "$CONFIG_NAME" == *"libero_spatial_grpo_openvlaoft_test"* ]]; then
@@ -80,6 +147,7 @@ if [ $TRAINING_EXIT_CODE -eq 0 ]; then
                 echo "Running evaluation for each checkpoint..."
                 echo ""
                 
+                # LOG_DIR already has the config tag injected, so use it directly
                 CHECKPOINT_LOCATION=$(echo "$LOG_DIR" | sed 's|^\./||')
                 EVAL_EXIT_CODE=0
                 
@@ -87,7 +155,7 @@ if [ $TRAINING_EXIT_CODE -eq 0 ]; then
                     echo "========================================="
                     echo "Evaluating checkpoint at global_step_${STEP}"
                     echo "========================================="
-                    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "${STEP}"
+                    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "${STEP}" "${EVAL_CONFIG_NAME}"
                     
                     STEP_EXIT_CODE=$?
                     if [ $STEP_EXIT_CODE -ne 0 ]; then

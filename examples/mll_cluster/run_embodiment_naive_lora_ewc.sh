@@ -85,6 +85,13 @@ else
     cd "$REPO_ROOT"
 fi
 
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
 # Main training loop
 OVERALL_EXIT_CODE=0
 
@@ -105,7 +112,24 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
         CHECKPOINT_PATH="$MANUAL_CHECKPOINT_PATH"
     elif [ "$TASK_ID" -eq 0 ]; then
         # Check if task 0 weights already exist (from naive_lora training)
-        EXISTING_TASK0_CHECKPOINT="./logs/naive_lora_ewc/task_0_seed${SEED}/checkpoints/global_step_10/actor"
+        PREV_LOG_DIR="./logs/naive_lora_ewc/task_0_seed${SEED}"
+        # Inject config tag into PREV_LOG_DIR to match where previous task saved checkpoint
+        if [ -n "$CONFIG_TAG" ]; then
+            # CONFIG_TAG is set, transform the path
+            PREV_LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$PREV_LOG_DIR" "$CONFIG_TAG")
+            # Validate transformation result
+            if [ -z "$PREV_LOG_DIR_TRANSFORMED" ]; then
+                echo "  ERROR: Failed to transform previous task log directory for task 0"
+                echo "         Original PREV_LOG_DIR: [$PREV_LOG_DIR]"
+                echo "         CONFIG_TAG: [$CONFIG_TAG]"
+                OVERALL_EXIT_CODE=1
+                break
+            fi
+        else
+            # CONFIG_TAG is empty, use path as-is (no transformation needed)
+            PREV_LOG_DIR_TRANSFORMED="$PREV_LOG_DIR"
+        fi
+        EXISTING_TASK0_CHECKPOINT="${PREV_LOG_DIR_TRANSFORMED}/checkpoints/global_step_10/actor"
         if [ -d "$EXISTING_TASK0_CHECKPOINT" ]; then
             # Task 0 weights exist - load them and train for 1 epoch to generate rollouts for Fisher
             CHECKPOINT_PATH="$EXISTING_TASK0_CHECKPOINT"
@@ -117,15 +141,53 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
     else
         # Use checkpoint from previous task
         PREV_TASK_ID=$((TASK_ID - 1))
-        CHECKPOINT_PATH="./logs/naive_lora_ewc/task_${PREV_TASK_ID}_seed${SEED}/checkpoints/global_step_10/actor"
+        PREV_LOG_DIR="./logs/naive_lora_ewc/task_${PREV_TASK_ID}_seed${SEED}"
+        # Inject config tag into PREV_LOG_DIR to match where previous task saved checkpoint
+        if [ -n "$CONFIG_TAG" ]; then
+            # CONFIG_TAG is set, transform the path
+            PREV_LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$PREV_LOG_DIR" "$CONFIG_TAG")
+            # Validate transformation result
+            if [ -z "$PREV_LOG_DIR_TRANSFORMED" ]; then
+                echo "  ERROR: Failed to transform previous task log directory for task $PREV_TASK_ID"
+                echo "         Original PREV_LOG_DIR: [$PREV_LOG_DIR]"
+                echo "         CONFIG_TAG: [$CONFIG_TAG]"
+                OVERALL_EXIT_CODE=1
+                break
+            fi
+        else
+            # CONFIG_TAG is empty, use path as-is (no transformation needed)
+            PREV_LOG_DIR_TRANSFORMED="$PREV_LOG_DIR"
+        fi
+        
+        # Use the transformed path
+        CHECKPOINT_PATH="${PREV_LOG_DIR_TRANSFORMED}/checkpoints/global_step_10/actor"
+        
+        # Additional validation: ensure CHECKPOINT_PATH is a valid relative or absolute path
+        if [[ "$CHECKPOINT_PATH" =~ ^/checkpoints/ ]]; then
+            echo "  ERROR: Invalid checkpoint path construction detected"
+            echo "         PREV_LOG_DIR was likely empty or malformed"
+            echo "         PREV_LOG_DIR: [$PREV_LOG_DIR]"
+            echo "         CHECKPOINT_PATH: [$CHECKPOINT_PATH]"
+            OVERALL_EXIT_CODE=1
+            break
+        fi
     fi
     
     # Determine EWC path from previous task
     if [ "$TASK_ID" -gt 0 ]; then
         PREV_TASK_ID=$((TASK_ID - 1))
         # Check standard path first
-        STANDARD_EWC_PATH="./logs/naive_lora_ewc/task_${PREV_TASK_ID}_seed${SEED}/ewc_data.pt"
-        EXISTING_EWC_PATH="./logs/naive_lora_ewc/task_${PREV_TASK_ID}_from_existing_seed${SEED}/ewc_data.pt"
+        PREV_LOG_DIR_STANDARD="./logs/naive_lora_ewc/task_${PREV_TASK_ID}_seed${SEED}"
+        PREV_LOG_DIR_EXISTING="./logs/naive_lora_ewc/task_${PREV_TASK_ID}_from_existing_seed${SEED}"
+        
+        # Inject config tag into both paths
+        if [ -n "$CONFIG_TAG" ]; then
+            PREV_LOG_DIR_STANDARD=$(inject_config_tag_into_log_path "$PREV_LOG_DIR_STANDARD" "$CONFIG_TAG")
+            PREV_LOG_DIR_EXISTING=$(inject_config_tag_into_log_path "$PREV_LOG_DIR_EXISTING" "$CONFIG_TAG")
+        fi
+        
+        STANDARD_EWC_PATH="${PREV_LOG_DIR_STANDARD}/ewc_data.pt"
+        EXISTING_EWC_PATH="${PREV_LOG_DIR_EXISTING}/ewc_data.pt"
         
         if [ -f "$STANDARD_EWC_PATH" ]; then
             EWC_PATH="$STANDARD_EWC_PATH"
@@ -173,16 +235,50 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
         LOG_DIR="./logs/naive_lora_ewc/task_${TASK_ID}_seed${SEED}"
     fi
     
+    # Inject config tag into LOG_DIR before exporting
+    if [ -n "$CONFIG_TAG" ]; then
+        # CONFIG_TAG is set, transform the path
+        LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
+        # Validate transformation result
+        if [ -z "$LOG_DIR_TRANSFORMED" ]; then
+            echo "  ERROR: Failed to transform LOG_DIR with config tag"
+            echo "         Original LOG_DIR: [$LOG_DIR]"
+            echo "         CONFIG_TAG: [$CONFIG_TAG]"
+            OVERALL_EXIT_CODE=1
+            break
+        fi
+        LOG_DIR="$LOG_DIR_TRANSFORMED"
+    else
+        # CONFIG_TAG is empty, use path as-is (no transformation needed)
+        # This is valid - it means no config tag was specified
+        :
+    fi
+    
+    # Validate LOG_DIR is not empty
+    if [ -z "$LOG_DIR" ]; then
+        echo "  ERROR: LOG_DIR is empty after path construction"
+        OVERALL_EXIT_CODE=1
+        break
+    fi
+    
     export LOG_DIR
     mkdir -p "${LOG_DIR}"
     
     # Set experiment name based on LOG_DIR (for wandb)
     EXPERIMENT_NAME=$(basename "$LOG_DIR")
+    # Append CONFIG_TAG to experiment name if set
+    if [ -n "$CONFIG_TAG" ]; then
+        EXPERIMENT_NAME="${EXPERIMENT_NAME}_${CONFIG_TAG}"
+    fi
     
     # Update SLURM job name to match experiment name (only for first task and if running under SLURM)
     if [ "$TASK_ID" -eq "$TASK_START" ] && [ -n "$SLURM_JOB_ID" ] && command -v scontrol &> /dev/null; then
         if [ "$IS_RANGE" = true ]; then
-            scontrol update job=$SLURM_JOB_ID name="ewc_lora_tasks_${TASK_START}_to_${TASK_END}" 2>/dev/null || true
+            if [ -n "$CONFIG_TAG" ]; then
+                scontrol update job=$SLURM_JOB_ID name="ewc_lora_tasks_${TASK_START}_to_${TASK_END}_${CONFIG_TAG}" 2>/dev/null || true
+            else
+                scontrol update job=$SLURM_JOB_ID name="ewc_lora_tasks_${TASK_START}_to_${TASK_END}" 2>/dev/null || true
+            fi
         else
             scontrol update job=$SLURM_JOB_ID name="${EXPERIMENT_NAME}" 2>/dev/null || true
         fi
@@ -241,7 +337,6 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
     # Build Hydra overrides
     OVERRIDES="env.fixed_task_ids=[${TASK_ID}] \
     	runner.logger.experiment_name=${EXPERIMENT_NAME} \
-    	actor.checkpoint_save_path=${LOG_DIR} \
     	actor.seed=${SEED} \
     	+algorithm.use_ewc=True"
     
@@ -273,10 +368,11 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
         echo "EWC data (if enabled) saved to: ${LOG_DIR}/ewc_data.pt"
         
         # Run evaluation
+        # LOG_DIR already has the config tag injected, so use it directly
         CHECKPOINT_LOCATION=$(echo "$LOG_DIR" | sed 's|^\./||')
         echo ""
         echo "Running evaluation for: ${CHECKPOINT_LOCATION}"
-        bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}"
+        bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "" "${EVAL_CONFIG_NAME}"
     else
         echo "✗ Task $TASK_ID failed with exit code $EXIT_CODE"
         if [ -n "$SLURM_JOB_ID" ]; then

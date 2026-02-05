@@ -113,6 +113,12 @@ class LiberoEnv(gym.Env):
         env_fn_params = []
         base_env_args = OmegaConf.to_container(self.cfg.init_params, resolve=True)
 
+        # Optional: per-task camera overrides (list of length num_tasks).
+        # Each entry is a dict of camera_name -> {pos, quat, ...}.
+        camera_overrides_per_task = base_env_args.pop(
+            "camera_overrides_per_task", None
+        )
+
         task_descriptions = []
         if env_idx is None:
             env_idx = np.arange(self.cfg.num_envs)
@@ -127,13 +133,20 @@ class LiberoEnv(gym.Env):
             task_bddl_file = os.path.join(
                 get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
             )
-            env_fn_params.append(
-                {
-                    **base_env_args,
-                    "bddl_file_name": task_bddl_file,
-                    "seed": self.seed,
-                }
-            )
+            # Per-task camera override if provided
+            env_kwargs = {
+                **base_env_args,
+                "bddl_file_name": task_bddl_file,
+                "seed": self.seed,
+            }
+            if camera_overrides_per_task is not None:
+                task_id = int(self.task_ids[env_id])
+                if 0 <= task_id < len(camera_overrides_per_task):
+                    camera_overrides = camera_overrides_per_task[task_id]
+                    if camera_overrides is not None:
+                        env_kwargs["camera_overrides"] = camera_overrides
+
+            env_fn_params.append(env_kwargs)
             task_descriptions.append(task.language)
         self.task_descriptions = task_descriptions
         return env_fn_params

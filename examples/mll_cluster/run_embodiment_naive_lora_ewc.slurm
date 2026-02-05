@@ -9,7 +9,7 @@
 #SBATCH --partition=mll                 # Partition name (adjust to your cluster's partition)
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=jiahengh@utexas.edu
-#SBATCH --exclude=slurm-node-008,slurm-node-011
+#SBATCH --exclude=slurm-node-008,slurm-node-011,slurm-node-010,slurm-node-004
 #SBATCH --output=logs/slurm/%x-%j.out              # Output file name (%x = job name, %j = job ID)
 #SBATCH --error=logs/slurm/%x-%j.err               # Error file name
 
@@ -33,8 +33,6 @@ MANUAL_CHECKPOINT_PATH=$2
 MAX_EPOCH=$3
 CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 SEED=${5:-1234}
-
-cd $SLURM_SUBMIT_DIR
 
 # Call the shell script
 bash examples/mll_cluster/run_embodiment_naive_lora_ewc.sh "${TASK_INPUT}" "${MANUAL_CHECKPOINT_PATH}" "${MAX_EPOCH}" "${CONFIG_NAME}" "${SEED}"

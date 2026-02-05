@@ -121,7 +121,6 @@ actor:
   training_backend: "fsdp"
 
   checkpoint_load_path: "${oc.env:REPO_PATH}/model/openvla-7b-rlvla-warmup/"
-  checkpoint_save_path: "${oc.env:REPO_PATH}/results"
 
   micro_batch_size: 20
   global_batch_size: 80

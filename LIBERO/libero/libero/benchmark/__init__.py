@@ -177,6 +177,24 @@ class LIBERO_SPATIAL(Benchmark):
 
 
 @register_benchmark
+class LIBERO_SPATIAL_CAM2(Benchmark):
+    """
+    Custom benchmark that reuses the LIBERO_SPATIAL task set but is intended
+    to be run with alternative camera configurations (e.g., different
+    agentview pose). No LIBERO assets are modified; only the benchmark name
+    and configuration differ.
+    """
+
+    def __init__(self, task_order_index=0):
+        super().__init__(task_order_index=task_order_index)
+        # NOTE: Reuse the underlying LIBERO_SPATIAL task map and assets.
+        # This makes `libero_spatial_cam2` a camera-configuration variant
+        # without duplicating any BDDL or init_state files.
+        self.name = "libero_spatial"
+        self._make_benchmark()
+
+
+@register_benchmark
 class LIBERO_OBJECT(Benchmark):
     def __init__(self, task_order_index=0):
         super().__init__(task_order_index=task_order_index)

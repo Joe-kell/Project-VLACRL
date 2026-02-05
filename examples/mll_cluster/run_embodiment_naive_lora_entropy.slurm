@@ -32,6 +32,13 @@ MAX_EPOCH=$4
 SEED=${5:-1234}
 CONFIG_NAME="mll_cluster/libero_spatial_grpo_openvlaoft"
 
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
 if [ -z "$TASK_ID" ] || [ -z "$ENTROPY_BONUS" ]; then
     echo "ERROR: Missing required arguments"
     echo "Usage: sbatch examples/mll_cluster/run_embodiment_naive_lora_entropy.slurm TASK_ID ENTROPY_BONUS [CHECKPOINT_PATH] [MAX_EPOCH] [SEED]"
@@ -56,7 +63,34 @@ if [ -z "$MANUAL_CHECKPOINT_PATH" ]; then
         CHECKPOINT_PATH=""
     else
         PREV_TASK_ID=$((TASK_ID - 1))
-        CHECKPOINT_PATH="./logs/naive_lora_entropy/task_${PREV_TASK_ID}_ent${ENTROPY_BONUS}_seed${SEED}/checkpoints/global_step_10/actor"
+        PREV_LOG_DIR="./logs/naive_lora_entropy/task_${PREV_TASK_ID}_ent${ENTROPY_BONUS}_seed${SEED}"
+        # Inject config tag into PREV_LOG_DIR to match where previous task saved checkpoint
+        if [ -z "$CONFIG_TAG" ]; then
+            # No config tag, use path as-is
+            PREV_LOG_DIR_TRANSFORMED="$PREV_LOG_DIR"
+        else
+            PREV_LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$PREV_LOG_DIR" "$CONFIG_TAG")
+        fi
+        
+        # Validate that PREV_LOG_DIR_TRANSFORMED is not empty
+        if [ -z "$PREV_LOG_DIR_TRANSFORMED" ]; then
+            echo "  ERROR: Failed to construct previous task log directory for task $PREV_TASK_ID"
+            echo "         Original PREV_LOG_DIR: [$PREV_LOG_DIR]"
+            echo "         CONFIG_TAG: [$CONFIG_TAG]"
+            exit 1
+        fi
+        
+        PREV_LOG_DIR="$PREV_LOG_DIR_TRANSFORMED"
+        CHECKPOINT_PATH="${PREV_LOG_DIR}/checkpoints/global_step_10/actor"
+        
+        # Additional validation: ensure CHECKPOINT_PATH is a valid relative or absolute path
+        if [[ "$CHECKPOINT_PATH" =~ ^/checkpoints/ ]]; then
+            echo "  ERROR: Invalid checkpoint path construction detected"
+            echo "         PREV_LOG_DIR was likely empty or malformed"
+            echo "         PREV_LOG_DIR: [$PREV_LOG_DIR]"
+            echo "         CHECKPOINT_PATH: [$CHECKPOINT_PATH]"
+            exit 1
+        fi
     fi
 else
     CHECKPOINT_PATH="$MANUAL_CHECKPOINT_PATH"
@@ -64,6 +98,24 @@ fi
 
 # Determine LOG_DIR - always include entropy bonus and seed in the name
 LOG_DIR="./logs/naive_lora_entropy/task_${TASK_ID}_ent${ENTROPY_BONUS}_seed${SEED}"
+
+# Inject config tag into LOG_DIR before exporting
+if [ -n "$CONFIG_TAG" ]; then
+    LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
+    if [ -z "$LOG_DIR_TRANSFORMED" ]; then
+        echo "  ERROR: Failed to transform LOG_DIR with config tag"
+        echo "         Original LOG_DIR: [$LOG_DIR]"
+        echo "         CONFIG_TAG: [$CONFIG_TAG]"
+        exit 1
+    fi
+    LOG_DIR="$LOG_DIR_TRANSFORMED"
+fi
+
+# Validate LOG_DIR is not empty
+if [ -z "$LOG_DIR" ]; then
+    echo "  ERROR: LOG_DIR is empty after path construction"
+    exit 1
+fi
 
 # Print job information
 echo "Job ID: $SLURM_JOB_ID"
@@ -81,6 +133,10 @@ export LOG_DIR
 
 # Set experiment name based on LOG_DIR (for wandb)
 EXPERIMENT_NAME=$(basename "$LOG_DIR")
+# Append CONFIG_TAG to experiment name if set
+if [ -n "$CONFIG_TAG" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_${CONFIG_TAG}"
+fi
 
 # Update SLURM job name to match experiment name
 if command -v scontrol &> /dev/null && [ -n "$SLURM_JOB_ID" ]; then
@@ -101,6 +157,11 @@ echo "  Random Seed: $SEED"
 if [ -n "$CHECKPOINT_PATH" ]; then
     if [ ! -d "$CHECKPOINT_PATH" ]; then
         echo "  ERROR: Checkpoint not found at $CHECKPOINT_PATH"
+        if [ "$TASK_ID" -gt 0 ]; then
+            PREV_TASK_ID=$((TASK_ID - 1))
+            echo "         Task $TASK_ID requires checkpoint from task $PREV_TASK_ID"
+            echo "         Make sure task $PREV_TASK_ID has been trained first, or provide a manual checkpoint path"
+        fi
         exit 1
     fi
     echo "  Loading from checkpoint: $CHECKPOINT_PATH"
@@ -119,12 +180,9 @@ fi
 echo "========================================="
 echo ""
 
-cd $SLURM_SUBMIT_DIR
-
 # Build Hydra overrides
 OVERRIDES="env.fixed_task_ids=[${TASK_ID}] \
 	runner.logger.experiment_name=${EXPERIMENT_NAME} \
-	actor.checkpoint_save_path=${LOG_DIR} \
 	algorithm.entropy_bonus=${ENTROPY_BONUS} \
 	actor.seed=${SEED}"
 
@@ -151,10 +209,11 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "Checkpoint saved to: ${LOG_DIR}"
     
     # Run evaluation
+    # LOG_DIR already has the config tag injected, so use it directly
     CHECKPOINT_LOCATION=$(echo "$LOG_DIR" | sed 's|^\./||')
     echo ""
     echo "Running evaluation for: ${CHECKPOINT_LOCATION}"
-    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}"
+    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "" "${EVAL_CONFIG_NAME}"
 else
     echo "✗ Task $TASK_ID failed with exit code $EXIT_CODE"
     echo "  Check logs at: logs/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out"

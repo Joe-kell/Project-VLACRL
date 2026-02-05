@@ -43,8 +43,7 @@ if [ -z "$CHECKPOINT_LOCATION" ] || [ -z "$TEMPERATURE" ]; then
     exit 1
 fi
 
-# Get workspace root (SLURM_SUBMIT_DIR is the directory where sbatch was run from)
-cd $SLURM_SUBMIT_DIR
+# Get workspace root (assume we're already in the workspace root)
 WORKSPACE_ROOT=$(pwd)
 mkdir -p logs/slurm
 

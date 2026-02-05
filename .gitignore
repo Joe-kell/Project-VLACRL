@@ -11,7 +11,7 @@ saved_weight
 build
 docs/build
 dist
-logs/*
+logs*
 *.so
 .venv
 uv.lock

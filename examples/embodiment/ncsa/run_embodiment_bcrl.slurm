@@ -76,8 +76,7 @@ OVERRIDES="algorithm.bc_coeff=${BC_COEFF} \
 	env.fixed_task_ids=[${TASK_ID}] \
 	runner.max_epochs=10 \
 	runner.save_interval=10 \
-	runner.logger.experiment_name=${EXPERIMENT_NAME} \
-	actor.checkpoint_save_path=${LOG_DIR}"
+	runner.logger.experiment_name=${EXPERIMENT_NAME}"
 
 if [ -n "$CHECKPOINT_PATH" ]; then
     OVERRIDES="$OVERRIDES ${CHECKPOINT_ARG}"

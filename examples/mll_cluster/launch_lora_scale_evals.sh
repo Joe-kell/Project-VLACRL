@@ -49,10 +49,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Get the directory where this script is located
-SCRIPT_DIR="$( cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )"
-WORKSPACE_ROOT="$( cd "${SCRIPT_DIR}/../.." && pwd )"
-SLURM_SCRIPT="${SCRIPT_DIR}/eval_embodiment_lora_scale.slurm"
+# Assume we're already in the workspace root
+WORKSPACE_ROOT=$(pwd)
+SLURM_SCRIPT="examples/mll_cluster/eval_embodiment_lora_scale.slurm"
 EVAL_SCRIPT="${WORKSPACE_ROOT}/examples/embodiment/eval_embodiment.sh"
 
 # Verify required scripts exist

@@ -26,6 +26,13 @@ MANUAL_CHECKPOINT_PATH=$3
 CONFIG_NAME=${4:-libero_spatial_grpo_openvlaoft_bcrl}  # Default config if not provided
 SEED=${5:-1234}
 
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
 if [ -z "$TASK_ID" ] || [ -z "$BC_COEFF" ]; then
     echo "ERROR: Missing required arguments"
     echo "Usage: sbatch examples/mll_cluster/run_embodiment_bcrl_action.slurm TASK_ID BC_COEFF [CHECKPOINT_PATH] [CONFIG_NAME] [SEED]"
@@ -46,7 +53,34 @@ if [ -z "$MANUAL_CHECKPOINT_PATH" ]; then
     else
         # Use checkpoint from previous task
         PREV_TASK_ID=$((TASK_ID - 1))
-        CHECKPOINT_PATH="./logs/bcrl_action/${BC_COEFF}/task_${PREV_TASK_ID}_seed${SEED}/checkpoints/global_step_10/actor"
+        PREV_LOG_DIR="./logs/bcrl_action/${BC_COEFF}/task_${PREV_TASK_ID}_seed${SEED}"
+        # Inject config tag into PREV_LOG_DIR to match where previous task saved checkpoint
+        if [ -z "$CONFIG_TAG" ]; then
+            # No config tag, use path as-is
+            PREV_LOG_DIR_TRANSFORMED="$PREV_LOG_DIR"
+        else
+            PREV_LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$PREV_LOG_DIR" "$CONFIG_TAG")
+        fi
+        
+        # Validate that PREV_LOG_DIR_TRANSFORMED is not empty
+        if [ -z "$PREV_LOG_DIR_TRANSFORMED" ]; then
+            echo "  ERROR: Failed to construct previous task log directory for task $PREV_TASK_ID"
+            echo "         Original PREV_LOG_DIR: [$PREV_LOG_DIR]"
+            echo "         CONFIG_TAG: [$CONFIG_TAG]"
+            exit 1
+        fi
+        
+        PREV_LOG_DIR="$PREV_LOG_DIR_TRANSFORMED"
+        CHECKPOINT_PATH="${PREV_LOG_DIR}/checkpoints/global_step_10/actor"
+        
+        # Additional validation: ensure CHECKPOINT_PATH is a valid relative or absolute path
+        if [[ "$CHECKPOINT_PATH" =~ ^/checkpoints/ ]]; then
+            echo "  ERROR: Invalid checkpoint path construction detected"
+            echo "         PREV_LOG_DIR was likely empty or malformed"
+            echo "         PREV_LOG_DIR: [$PREV_LOG_DIR]"
+            echo "         CHECKPOINT_PATH: [$CHECKPOINT_PATH]"
+            exit 1
+        fi
     fi
 else
     # Use manually provided checkpoint path
@@ -67,9 +101,31 @@ mkdir -p logs/slurm
 mkdir -p logs/bcrl_action
 mkdir -p logs/bcrl_action/${BC_COEFF}
 LOG_DIR="./logs/bcrl_action/${BC_COEFF}/task_${TASK_ID}_seed${SEED}"
+# Inject config tag into LOG_DIR before exporting
+if [ -n "$CONFIG_TAG" ]; then
+    LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
+    if [ -z "$LOG_DIR_TRANSFORMED" ]; then
+        echo "  ERROR: Failed to transform LOG_DIR with config tag"
+        echo "         Original LOG_DIR: [$LOG_DIR]"
+        echo "         CONFIG_TAG: [$CONFIG_TAG]"
+        exit 1
+    fi
+    LOG_DIR="$LOG_DIR_TRANSFORMED"
+fi
+
+# Validate LOG_DIR is not empty
+if [ -z "$LOG_DIR" ]; then
+    echo "  ERROR: LOG_DIR is empty after path construction"
+    exit 1
+fi
+
 export LOG_DIR
 
 EXPERIMENT_NAME="bcrl_action_task_${TASK_ID}_${BC_COEFF}"
+# Append CONFIG_TAG to experiment name if set
+if [ -n "$CONFIG_TAG" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_${CONFIG_TAG}"
+fi
 
 # Update SLURM job name to be more descriptive (based on LOG_DIR)
 # Extract meaningful path components: bcrl_action/${BC_COEFF}/task_${TASK_ID}
@@ -78,7 +134,11 @@ LOG_DIR_PARENT=$(basename "$(dirname "$LOG_DIR")")  # e.g., "0.3"
 LOG_DIR_BASENAME=$(basename "$LOG_DIR")  # e.g., "task_0"
 if command -v scontrol &> /dev/null && [ -n "$SLURM_JOB_ID" ]; then
     # Combine to show both BC_COEFF and task: "bcrl_action_0.3_task_0"
-    scontrol update job=$SLURM_JOB_ID name="bcrl_action_${LOG_DIR_PARENT}_${LOG_DIR_BASENAME}" 2>/dev/null || true
+    JOB_NAME="bcrl_action_${LOG_DIR_PARENT}_${LOG_DIR_BASENAME}"
+    if [ -n "$CONFIG_TAG" ]; then
+        JOB_NAME="${JOB_NAME}_${CONFIG_TAG}"
+    fi
+    scontrol update job=$SLURM_JOB_ID name="${JOB_NAME}" 2>/dev/null || true
 fi
 
 echo "========================================="
@@ -102,6 +162,11 @@ if [ -n "$CHECKPOINT_PATH" ]; then
     # Verify checkpoint exists
     if [ ! -d "$CHECKPOINT_PATH" ]; then
         echo "  ERROR: Checkpoint not found at $CHECKPOINT_PATH"
+        if [ "$TASK_ID" -gt 0 ]; then
+            PREV_TASK_ID=$((TASK_ID - 1))
+            echo "         Task $TASK_ID requires checkpoint from task $PREV_TASK_ID"
+            echo "         Make sure task $PREV_TASK_ID has been trained first, or provide a manual checkpoint path"
+        fi
         exit 1
     fi
     CHECKPOINT_ARG="+actor.model.lora_path=${CHECKPOINT_PATH}"
@@ -112,13 +177,10 @@ fi
 echo "========================================="
 echo ""
 
-cd $SLURM_SUBMIT_DIR
-
 # hydra overrides
 OVERRIDES="algorithm.bc_coeff=${BC_COEFF} \
 	env.fixed_task_ids=[${TASK_ID}] \
 	runner.logger.experiment_name=${EXPERIMENT_NAME} \
-	actor.checkpoint_save_path=${LOG_DIR} \
 	actor.seed=${SEED}"
 
 if [ -n "$CHECKPOINT_PATH" ]; then
@@ -140,10 +202,11 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "Checkpoint saved to: ${LOG_DIR}"
     
     # Run evaluation
+    # LOG_DIR already has the config tag injected, so use it directly
     CHECKPOINT_LOCATION=$(echo "$LOG_DIR" | sed 's|^\./||')
     echo ""
     echo "Running evaluation for: ${CHECKPOINT_LOCATION}"
-    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}"
+    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "" "${EVAL_CONFIG_NAME}"
 else
     echo "✗ Task $TASK_ID failed with exit code $EXIT_CODE"
     echo "  Check logs at: logs/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out"

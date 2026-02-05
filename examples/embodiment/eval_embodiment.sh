@@ -144,6 +144,16 @@ if [ -n "${TEMPERATURE_EVAL}" ]; then
     LOG_SUBDIR="${LOG_SUBDIR}_temp_${TEMPERATURE_PATH}"
 fi
 
+# Extract config tag from CONFIG_NAME
+# If config ends with _openvlaoft or _eval, don't set CONFIG_TAG
+# Otherwise, extract the part after the last _
+CONFIG_TAG=""
+if [[ ! "${CONFIG_NAME}" =~ _openvlaoft$ ]] && [[ ! "${CONFIG_NAME}" =~ _eval$ ]]; then
+    if [[ "${CONFIG_NAME}" =~ _([^_/]+)$ ]]; then
+        CONFIG_TAG="${BASH_REMATCH[1]}"
+    fi
+fi
+
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 # Extract step number from lora_path if available, or use environment variable
@@ -154,11 +164,18 @@ elif [ -n "${EVAL_STEP_NUMBER}" ]; then
     STEP_NUMBER="${EVAL_STEP_NUMBER}"
 fi
 
+# Build log directory path with config tag if present
+if [ -n "${CONFIG_TAG}" ]; then
+    LOGS_BASE="${REPO_PATH}/logs_${CONFIG_TAG}/evals"
+else
+    LOGS_BASE="${REPO_PATH}/logs/evals"
+fi
+
 # Include step number in log directory name if available
 if [ -n "${STEP_NUMBER}" ]; then
-    LOG_DIR="${REPO_PATH}/logs/evals/${LOG_SUBDIR}_step_${STEP_NUMBER}_${TIMESTAMP}"
+    LOG_DIR="${LOGS_BASE}/${LOG_SUBDIR}_step_${STEP_NUMBER}_${TIMESTAMP}"
 else
-    LOG_DIR="${REPO_PATH}/logs/evals/${LOG_SUBDIR}_${TIMESTAMP}"
+    LOG_DIR="${LOGS_BASE}/${LOG_SUBDIR}_${TIMESTAMP}"
 fi
 
 MEGA_LOG_FILE="${LOG_DIR}/eval_embodiment.log"

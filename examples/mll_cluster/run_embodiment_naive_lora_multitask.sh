@@ -17,6 +17,13 @@ MAX_EPOCH=$3
 CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 SEED=${5:-1234}
 
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
 if [ -z "$TASK_IDS_STR" ]; then
     echo "ERROR: Missing required argument"
     echo "Usage: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh TASK_IDS [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]"
@@ -55,19 +62,25 @@ TASK_LIST_STR=$(IFS=','; echo "${sorted_task_ids[*]}")
 TASK_DIR_STR=$(IFS='_'; echo "${sorted_task_ids[*]}")
 
 # Determine LOG_DIR based on checkpoint path
-if [ -n "$CHECKPOINT_PATH" ]; then
-    # Extract global_step from checkpoint path
-    # e.g., .../checkpoints/global_step_10/actor -> step_10
-    if [[ "$CHECKPOINT_PATH" =~ global_step_([0-9]+) ]]; then
-        SOURCE_STEP="${BASH_REMATCH[1]}"
-        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_step_${SOURCE_STEP}_seed${SEED}"
+# Check if LOG_DIR is already set (e.g., by SLURM script with config tag injection)
+if [ -z "$LOG_DIR" ]; then
+    if [ -n "$CHECKPOINT_PATH" ]; then
+        # Extract global_step from checkpoint path
+        # e.g., .../checkpoints/global_step_10/actor -> step_10
+        if [[ "$CHECKPOINT_PATH" =~ global_step_([0-9]+) ]]; then
+            SOURCE_STEP="${BASH_REMATCH[1]}"
+            LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_step_${SOURCE_STEP}_seed${SEED}"
+        else
+            # Fallback: use a generic name
+            LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_seed${SEED}"
+        fi
     else
-        # Fallback: use a generic name
-        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_from_checkpoint_seed${SEED}"
+        # Standard case: use task IDs
+        LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_seed${SEED}"
     fi
 else
-    # Standard case: use task IDs
-    LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_seed${SEED}"
+    # LOG_DIR is already set (e.g., by SLURM script with config tag injection)
+    echo "Using pre-set LOG_DIR: $LOG_DIR"
 fi
 
 # Print job information (only if running under SLURM)
@@ -88,6 +101,10 @@ export LOG_DIR
 
 # Set experiment name based on LOG_DIR (for wandb)
 EXPERIMENT_NAME=$(basename "$LOG_DIR")
+# Append CONFIG_TAG to experiment name if set
+if [ -n "$CONFIG_TAG" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_${CONFIG_TAG}"
+fi
 
 # Update SLURM job name to match experiment name (only if running under SLURM)
 if [ -n "$SLURM_JOB_ID" ] && command -v scontrol &> /dev/null; then
@@ -127,20 +144,11 @@ fi
 echo "========================================="
 echo ""
 
-# Change to script directory if running under SLURM, otherwise use current directory
-if [ -n "$SLURM_SUBMIT_DIR" ]; then
-    cd "$SLURM_SUBMIT_DIR"
-else
-    # Get the directory where this script is located
-    SCRIPT_DIR="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
-    REPO_ROOT=$(dirname $(dirname "$SCRIPT_DIR"))
-    cd "$REPO_ROOT"
-fi
 
 # Build Hydra overrides
 # Note: fixed_task_ids expects a list format like [0,2,4]
 # Build as space-separated string (not multi-line) to avoid argument splitting issues
-OVERRIDES="env.fixed_task_ids=[${TASK_LIST_STR}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.checkpoint_save_path=${LOG_DIR} actor.seed=${SEED}"
+OVERRIDES="env.fixed_task_ids=[${TASK_LIST_STR}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED}"
 
 if [ -n "$CHECKPOINT_PATH" ]; then
     # Set lora_path to load LoRA adapter weights (like single-task version)

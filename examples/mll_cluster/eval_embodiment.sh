@@ -3,9 +3,10 @@
 # Direct evaluation script for embodied agent (without SLURM)
 # This script can be run directly on the terminal
 #
-# Usage: ./examples/mll_cluster/eval_embodiment.sh CHECKPOINT_LOCATION [STEP_NUMBER]
+# Usage: ./examples/mll_cluster/eval_embodiment.sh CHECKPOINT_LOCATION [STEP_NUMBER] [CONFIG_NAME]
 # Example: ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0
 # Example: ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20
+# Example (cam suite config): ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20 mll_cluster/libero_spatial_grpo_openvlaoft_eval_cam
 #
 # Note: CHECKPOINT_LOCATION should be relative to workspace root (e.g., logs/bcrl_logit/0.3/task_0)
 #       The script will construct the full path: ${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_${STEP_NUMBER}/actor/
@@ -13,17 +14,24 @@
 
 CHECKPOINT_LOCATION=$1
 STEP_NUMBER=$2
+CONFIG_NAME=$3
 
 # Default STEP_NUMBER to 10 if not provided
 if [ -z "$STEP_NUMBER" ]; then
     STEP_NUMBER=10
 fi
 
+# Default CONFIG_NAME to original libero_spatial eval config if not provided
+if [ -z "$CONFIG_NAME" ]; then
+    CONFIG_NAME="mll_cluster/libero_spatial_grpo_openvlaoft_eval"
+fi
+
 if [ -z "$CHECKPOINT_LOCATION" ]; then
     echo "ERROR: Missing required argument"
-    echo "Usage: ./examples/mll_cluster/eval_embodiment.sh CHECKPOINT_LOCATION [STEP_NUMBER]"
-    echo "Example: ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0"
-    echo "Example: ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20"
+    echo "Usage: ./examples/mll_cluster/eval_embodiment.sh CHECKPOINT_LOCATION|base [STEP_NUMBER] [CONFIG_NAME]"
+    echo "Example (LoRA eval): ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20"
+    echo "Example (cam suite config): ./examples/mll_cluster/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20 mll_cluster/libero_spatial_grpo_openvlaoft_eval_cam"
+    echo "Example (base model eval): ./examples/mll_cluster/eval_embodiment.sh base 0 mll_cluster/libero_spatial_grpo_openvlaoft_eval"
     exit 1
 fi
 
@@ -33,35 +41,51 @@ if ! [[ "$STEP_NUMBER" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# Get workspace root (script directory's parent's parent)
-SCRIPT_DIR="$( cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )"
-WORKSPACE_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
-cd "$WORKSPACE_ROOT"
+# Get workspace root (assume we're already in the workspace root)
+WORKSPACE_ROOT=$(pwd)
 
-# Construct full checkpoint path (remove any trailing slashes from CHECKPOINT_LOCATION first)
-CHECKPOINT_LOCATION="${CHECKPOINT_LOCATION%/}"
-CHECKPOINT_PATH="${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_${STEP_NUMBER}/actor/"
+# Base eval mode (no LoRA path)
+IS_BASE_EVAL=false
+if [ "$CHECKPOINT_LOCATION" = "base" ]; then
+    IS_BASE_EVAL=true
+fi
 
-# Verify checkpoint exists
-if [ ! -d "$CHECKPOINT_PATH" ]; then
-    echo "ERROR: Checkpoint not found at $CHECKPOINT_PATH"
-    exit 1
+CHECKPOINT_PATH=""
+if [ "$IS_BASE_EVAL" = false ]; then
+    # Construct full checkpoint path (remove any trailing slashes from CHECKPOINT_LOCATION first)
+    CHECKPOINT_LOCATION="${CHECKPOINT_LOCATION%/}"
+    CHECKPOINT_PATH="${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_${STEP_NUMBER}/actor/"
+
+    # Verify checkpoint exists
+    if [ ! -d "$CHECKPOINT_PATH" ]; then
+        echo "ERROR: Checkpoint not found at $CHECKPOINT_PATH"
+        exit 1
+    fi
 fi
 
 # Print job information
 echo "Working Directory: $(pwd)"
 echo "Checkpoint Location: $CHECKPOINT_LOCATION"
-echo "Full Checkpoint Path: $CHECKPOINT_PATH"
+if [ "$IS_BASE_EVAL" = true ]; then
+    echo "Full Checkpoint Path: (base model; no LoRA)"
+else
+    echo "Full Checkpoint Path: $CHECKPOINT_PATH"
+fi
 echo "Global Step Number: $STEP_NUMBER"
+echo "Config Name: $CONFIG_NAME"
 echo "Start Time: $(date)"
 echo ""
 
 # Create a wrapper script that modifies the log path to include step number
-# We'll pass an environment variable to the eval script
+# and a short config tag. We'll pass environment variables to the eval script.
 export EVAL_STEP_NUMBER="${STEP_NUMBER}"
 
-# Run the evaluation
-bash examples/embodiment/eval_embodiment.sh mll_cluster/libero_spatial_grpo_openvlaoft_eval +actor.model.lora_path="${CHECKPOINT_PATH}"
+
+if [ "$IS_BASE_EVAL" = true ]; then
+    bash examples/embodiment/eval_embodiment.sh ${CONFIG_NAME} actor.model.is_lora=False
+else
+    bash examples/embodiment/eval_embodiment.sh ${CONFIG_NAME} +actor.model.lora_path="${CHECKPOINT_PATH}"
+fi
 
 EXIT_CODE=$?
 

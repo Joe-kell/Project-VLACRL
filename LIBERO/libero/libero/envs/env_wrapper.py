@@ -53,6 +53,10 @@ class ControlEnv:
         self.problem_name = problem_info["problem_name"]
         self.domain_name = problem_info["domain_name"]
         self.language_instruction = problem_info["language_instruction"]
+        # Optional: per-run camera overrides (used by RLinf to create suites with
+        # modified camera poses without touching LIBERO assets).
+        camera_overrides = kwargs.pop("camera_overrides", None)
+
         self.env = TASK_MAPPING[self.problem_name](
             bddl_file_name,
             robots=robots,
@@ -80,6 +84,43 @@ class ControlEnv:
             **kwargs,
         )
 
+        # Store camera_overrides for re-application after reset/set_init_state
+        self._camera_overrides = camera_overrides
+
+        # Apply camera overrides initially if provided
+        if camera_overrides is not None:
+            self._apply_camera_overrides(is_initial=True)
+
+    def _apply_camera_overrides(self, is_initial=False):
+        """
+        Apply stored camera overrides to the MuJoCo model.
+        
+        This method must be called after reset() and set_state() because:
+        1. reset() may reset camera parameters to defaults
+        2. set_state() restores the entire MuJoCo state (including camera params) 
+           from a saved state, overwriting our overrides
+        
+        Args:
+            is_initial: If True, this is the initial application (during __init__).
+                       If False, this is a re-application after reset/set_init_state.
+        """
+        if self._camera_overrides is None:
+            return
+
+        model = self.env.sim.model
+        for cam_name, cam_cfg in self._camera_overrides.items():
+            try:
+                cam_id = model.camera_name2id(cam_name)
+            except Exception:
+                continue
+
+            if "pos" in cam_cfg:
+                model.cam_pos[cam_id] = np.array(cam_cfg["pos"])
+            if "quat" in cam_cfg:
+                model.cam_quat[cam_id] = np.array(cam_cfg["quat"])
+
+        self.env.sim.forward()
+
     @property
     def obj_of_interest(self):
         return self.env.obj_of_interest
@@ -97,6 +138,9 @@ class ControlEnv:
                 pass
             finally:
                 continue
+
+        # Re-apply camera overrides after reset
+        self._apply_camera_overrides(is_initial=False)
 
         return ret
 
@@ -140,7 +184,12 @@ class ControlEnv:
         self.set_state(mujoco_state)
         self.env.sim.forward()
         self.check_success()
+        
+        # Re-apply camera overrides before observables are updated
+        self._apply_camera_overrides(is_initial=False)
+        
         self._post_process()
+
         self._update_observables(force=True)
         return self.env._get_observations()
 

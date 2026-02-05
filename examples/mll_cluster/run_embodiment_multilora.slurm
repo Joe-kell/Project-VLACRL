@@ -41,6 +41,13 @@ MERGE_COEFFICIENT=$2
 CONFIG_NAME=${3:-mll_cluster/libero_spatial_grpo_openvlaoft}  # Default config if not provided
 SEED=${4:-1234}
 
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
 if [ -z "$TASK_ID" ]; then
     echo "ERROR: Missing required argument"
     echo "Usage: sbatch examples/mll_cluster/run_embodiment_multilora.slurm TASK_ID [MERGE_COEFFICIENT] [CONFIG_NAME] [SEED]"
@@ -95,6 +102,28 @@ else
     LOG_DIR="./logs/naive_lora_multilora/task_${TASK_ID}_coeff_${COEFFICIENT_PATH}_seed${SEED}"
     EXPERIMENT_NAME="multilora_task_${TASK_ID}_coeff_${COEFFICIENT_PATH}_seed${SEED}"
 fi
+# Append CONFIG_TAG to experiment name if set
+if [ -n "$CONFIG_TAG" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_${CONFIG_TAG}"
+fi
+# Inject config tag into LOG_DIR before exporting
+if [ -n "$CONFIG_TAG" ]; then
+    LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
+    if [ -z "$LOG_DIR_TRANSFORMED" ]; then
+        echo "  ERROR: Failed to transform LOG_DIR with config tag"
+        echo "         Original LOG_DIR: [$LOG_DIR]"
+        echo "         CONFIG_TAG: [$CONFIG_TAG]"
+        exit 1
+    fi
+    LOG_DIR="$LOG_DIR_TRANSFORMED"
+fi
+
+# Validate LOG_DIR is not empty
+if [ -z "$LOG_DIR" ]; then
+    echo "  ERROR: LOG_DIR is empty after path construction"
+    exit 1
+fi
+
 export LOG_DIR
 
 # Update SLURM job name to be more descriptive (based on LOG_DIR)
@@ -104,7 +133,11 @@ LOG_DIR_BASENAME=$(basename "$LOG_DIR")
 if command -v scontrol &> /dev/null && [ -n "$SLURM_JOB_ID" ]; then
     # Use the full directory name from LOG_DIR as the job name
     # This will show as "task_0" or "task_1_coeff_0_8" in SLURM, matching LOG_DIR exactly
-    scontrol update job=$SLURM_JOB_ID name="${LOG_DIR_BASENAME}" 2>/dev/null || true
+    JOB_NAME="${LOG_DIR_BASENAME}"
+    if [ -n "$CONFIG_TAG" ]; then
+        JOB_NAME="${JOB_NAME}_${CONFIG_TAG}"
+    fi
+    scontrol update job=$SLURM_JOB_ID name="${JOB_NAME}" 2>/dev/null || true
 fi
 
 echo "========================================="
@@ -128,10 +161,37 @@ if [ "$TASK_ID" -gt 0 ]; then
     for prev_task in $(seq 0 $((TASK_ID - 1))); do
         # Task 0 adapter comes from naive_lora folder (no coefficient in path, but includes seed)
         if [ "$prev_task" -eq 0 ]; then
-            prev_adapter_path="./logs/naive_lora/task_${prev_task}_seed${SEED}/checkpoints/global_step_10/actor"
+            prev_log_dir="./logs/naive_lora/task_${prev_task}_seed${SEED}"
         else
             # Tasks 1+ use coefficient and seed in path to find matching adapters
-            prev_adapter_path="./logs/naive_lora_multilora/task_${prev_task}_coeff_${COEFFICIENT_PATH}_seed${SEED}/checkpoints/global_step_10/actor"
+            prev_log_dir="./logs/naive_lora_multilora/task_${prev_task}_coeff_${COEFFICIENT_PATH}_seed${SEED}"
+        fi
+        # Inject config tag into prev_log_dir to match where previous task saved checkpoint
+        if [ -z "$CONFIG_TAG" ]; then
+            # No config tag, use path as-is
+            prev_log_dir_transformed="$prev_log_dir"
+        else
+            prev_log_dir_transformed=$(inject_config_tag_into_log_path "$prev_log_dir" "$CONFIG_TAG")
+        fi
+        
+        # Validate that prev_log_dir_transformed is not empty
+        if [ -z "$prev_log_dir_transformed" ]; then
+            echo "    ERROR: Failed to construct log directory for task $prev_task"
+            echo "           Original prev_log_dir: [$prev_log_dir]"
+            echo "           CONFIG_TAG: [$CONFIG_TAG]"
+            continue
+        fi
+        
+        prev_log_dir="$prev_log_dir_transformed"
+        prev_adapter_path="${prev_log_dir}/checkpoints/global_step_10/actor"
+        
+        # Additional validation: ensure prev_adapter_path is a valid relative or absolute path
+        if [[ "$prev_adapter_path" =~ ^/checkpoints/ ]]; then
+            echo "    ERROR: Invalid adapter path construction detected for task $prev_task"
+            echo "           prev_log_dir was likely empty or malformed"
+            echo "           prev_log_dir: [$prev_log_dir]"
+            echo "           prev_adapter_path: [$prev_adapter_path]"
+            continue
         fi
         
         if [ -d "$prev_adapter_path" ]; then
@@ -157,12 +217,9 @@ fi
 echo "========================================="
 echo ""
 
-cd $SLURM_SUBMIT_DIR
-
 # Hydra overrides
 OVERRIDES="env.fixed_task_ids=[${TASK_ID}] \
 	runner.logger.experiment_name=${EXPERIMENT_NAME} \
-	actor.checkpoint_save_path=${LOG_DIR} \
 	actor.seed=${SEED}"
 
 if [ -n "$LORA_PATHS_ARG" ]; then
@@ -189,10 +246,11 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "  (Merge coefficient is automatically saved with checkpoint)"
     
     # Run evaluation
+    # LOG_DIR already has the config tag injected, so use it directly
     CHECKPOINT_LOCATION=$(echo "$LOG_DIR" | sed 's|^\./||')
     echo ""
     echo "Running evaluation for: ${CHECKPOINT_LOCATION}"
-    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}"
+    bash examples/mll_cluster/eval_embodiment.sh "${CHECKPOINT_LOCATION}" "" "${EVAL_CONFIG_NAME}"
 else
     echo "✗ Task $TASK_ID (Multi-LoRA) failed with exit code $EXIT_CODE"
     echo "  Check logs at: logs/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out"
