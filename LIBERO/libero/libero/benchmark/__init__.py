@@ -195,6 +195,41 @@ class LIBERO_SPATIAL_CAM2(Benchmark):
 
 
 @register_benchmark
+class LIBERO_SPATIAL_LIGHT2(Benchmark):
+    """
+    Custom benchmark that reuses the LIBERO_SPATIAL task set but is intended
+    to be run with alternative lighting configurations (e.g., different
+    light intensity, position, direction). No LIBERO assets are modified; only
+    the benchmark name and configuration differ.
+    """
+
+    def __init__(self, task_order_index=0):
+        super().__init__(task_order_index=task_order_index)
+        # NOTE: Reuse the underlying LIBERO_SPATIAL task map and assets.
+        # This makes `libero_spatial_light2` a lighting-configuration variant
+        # without duplicating any BDDL or init_state files.
+        self.name = "libero_spatial"
+        self._make_benchmark()
+
+
+@register_benchmark
+class LIBERO_SPATIAL_POS2(Benchmark):
+    """
+    Custom benchmark that reuses the LIBERO_SPATIAL task set but is intended
+    to be run with alternative robot initial positions. No LIBERO assets are modified; only
+    the benchmark name and configuration differ.
+    """
+
+    def __init__(self, task_order_index=0):
+        super().__init__(task_order_index=task_order_index)
+        # NOTE: Reuse the underlying LIBERO_SPATIAL task map and assets.
+        # This makes `libero_spatial_pos2` a robot-position variant
+        # without duplicating any BDDL or init_state files.
+        self.name = "libero_spatial"
+        self._make_benchmark()
+
+
+@register_benchmark
 class LIBERO_OBJECT(Benchmark):
     def __init__(self, task_order_index=0):
         super().__init__(task_order_index=task_order_index)

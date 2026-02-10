@@ -56,6 +56,12 @@ class ControlEnv:
         # Optional: per-run camera overrides (used by RLinf to create suites with
         # modified camera poses without touching LIBERO assets).
         camera_overrides = kwargs.pop("camera_overrides", None)
+        # Optional: per-run light overrides (used by RLinf to create suites with
+        # modified lighting conditions without touching LIBERO assets).
+        light_overrides = kwargs.pop("light_overrides", None)
+        # Optional: per-run robot base position override (used by RLinf to create suites with
+        # modified robot initial positions without touching LIBERO assets).
+        robot_base_pos_override = kwargs.pop("robot_base_pos_override", None)
 
         self.env = TASK_MAPPING[self.problem_name](
             bddl_file_name,
@@ -86,10 +92,20 @@ class ControlEnv:
 
         # Store camera_overrides for re-application after reset/set_init_state
         self._camera_overrides = camera_overrides
+        # Store light_overrides for re-application after reset/set_init_state
+        self._light_overrides = light_overrides
+        # Store robot_base_pos_override for re-application after reset/set_init_state
+        self._robot_base_pos_override = robot_base_pos_override
 
         # Apply camera overrides initially if provided
         if camera_overrides is not None:
             self._apply_camera_overrides(is_initial=True)
+        # Apply light overrides initially if provided
+        if light_overrides is not None:
+            self._apply_light_overrides(is_initial=True)
+        # Apply robot base position override initially if provided
+        if robot_base_pos_override is not None:
+            self._apply_robot_base_pos_override(is_initial=True)
 
     def _apply_camera_overrides(self, is_initial=False):
         """
@@ -121,6 +137,100 @@ class ControlEnv:
 
         self.env.sim.forward()
 
+    def _apply_light_overrides(self, is_initial=False):
+        """
+        Apply stored light overrides to the MuJoCo model.
+        
+        This method must be called after reset() and set_state() because:
+        1. reset() may reset light parameters to defaults
+        2. set_state() restores the entire MuJoCo state (including light params) 
+           from a saved state, overwriting our overrides
+        
+        Args:
+            is_initial: If True, this is the initial application (during __init__).
+                       If False, this is a re-application after reset/set_init_state.
+        """
+        if self._light_overrides is None:
+            return
+
+        model = self.env.sim.model
+        for light_name, light_cfg in self._light_overrides.items():
+            try:
+                light_id = model.light_name2id(light_name)
+            except Exception:
+                continue
+
+            if "pos" in light_cfg:
+                model.light_pos[light_id] = np.array(light_cfg["pos"])
+            if "dir" in light_cfg:
+                model.light_dir[light_id] = np.array(light_cfg["dir"])
+            if "diffuse" in light_cfg:
+                model.light_diffuse[light_id] = np.array(light_cfg["diffuse"])
+            if "specular" in light_cfg:
+                model.light_specular[light_id] = np.array(light_cfg["specular"])
+            if "directional" in light_cfg:
+                model.light_directional[light_id] = light_cfg["directional"]
+
+        self.env.sim.forward()
+
+    def _apply_robot_base_pos_override(self, is_initial=False):
+        """
+        Apply stored robot base position override to the MuJoCo model.
+        
+        This method must be called after reset() and set_state() because:
+        1. reset() may reset robot position to defaults
+        2. set_state() restores the entire MuJoCo state (including robot position) 
+           from a saved state, overwriting our overrides
+        
+        Args:
+            is_initial: If True, this is the initial application (during __init__).
+                       If False, this is a re-application after reset/set_init_state.
+        """
+        if self._robot_base_pos_override is None:
+            return
+
+        model = self.env.sim.model
+        
+        # Get robot base body from robot model
+        try:
+            robot_base_body_name = self.env.robots[0].robot_model.root_body
+        except Exception:
+            # Fallback: try to find by name pattern
+            robot_base_body_name = None
+            for body_id in range(model.nbody):
+                body_name = model.id2name(body_id, "body")
+                if body_name and "robot0" in body_name and "base" in body_name:
+                    robot_base_body_name = body_name
+                    break
+        
+        if robot_base_body_name is None:
+            return
+        
+        try:
+            body_id = model.body_name2id(robot_base_body_name)
+        except Exception:
+            return
+
+        # Apply position override (relative to default position)
+        # robot_base_pos_override should be [x, y, z] offset
+        if isinstance(self._robot_base_pos_override, (list, tuple, np.ndarray)):
+            offset = np.array(self._robot_base_pos_override)
+            # Get current position and add offset
+            current_pos = model.body_pos[body_id].copy()
+            new_pos = current_pos + offset
+            model.body_pos[body_id] = new_pos
+        elif isinstance(self._robot_base_pos_override, dict):
+            # If it's a dict with absolute position
+            if "pos" in self._robot_base_pos_override:
+                model.body_pos[body_id] = np.array(self._robot_base_pos_override["pos"])
+            elif "offset" in self._robot_base_pos_override:
+                offset = np.array(self._robot_base_pos_override["offset"])
+                current_pos = model.body_pos[body_id].copy()
+                new_pos = current_pos + offset
+                model.body_pos[body_id] = new_pos
+
+        self.env.sim.forward()
+
     @property
     def obj_of_interest(self):
         return self.env.obj_of_interest
@@ -141,6 +251,10 @@ class ControlEnv:
 
         # Re-apply camera overrides after reset
         self._apply_camera_overrides(is_initial=False)
+        # Re-apply light overrides after reset
+        self._apply_light_overrides(is_initial=False)
+        # Re-apply robot base position override after reset
+        self._apply_robot_base_pos_override(is_initial=False)
 
         return ret
 
@@ -187,6 +301,10 @@ class ControlEnv:
         
         # Re-apply camera overrides before observables are updated
         self._apply_camera_overrides(is_initial=False)
+        # Re-apply light overrides before observables are updated
+        self._apply_light_overrides(is_initial=False)
+        # Re-apply robot base position override before observables are updated
+        self._apply_robot_base_pos_override(is_initial=False)
         
         self._post_process()
 

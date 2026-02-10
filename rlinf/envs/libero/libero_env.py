@@ -118,6 +118,16 @@ class LiberoEnv(gym.Env):
         camera_overrides_per_task = base_env_args.pop(
             "camera_overrides_per_task", None
         )
+        # Optional: per-task light overrides (list of length num_tasks).
+        # Each entry is a dict of light_name -> {pos, dir, diffuse, specular, ...}.
+        light_overrides_per_task = base_env_args.pop(
+            "light_overrides_per_task", None
+        )
+        # Optional: per-task robot base position overrides (list of length num_tasks).
+        # Each entry is [x, y, z] offset or {"offset": [x, y, z]} or {"pos": [x, y, z]}.
+        robot_base_pos_override_per_task = base_env_args.pop(
+            "robot_base_pos_override_per_task", None
+        )
 
         task_descriptions = []
         if env_idx is None:
@@ -145,6 +155,20 @@ class LiberoEnv(gym.Env):
                     camera_overrides = camera_overrides_per_task[task_id]
                     if camera_overrides is not None:
                         env_kwargs["camera_overrides"] = camera_overrides
+            
+            if light_overrides_per_task is not None:
+                task_id = int(self.task_ids[env_id])
+                if 0 <= task_id < len(light_overrides_per_task):
+                    light_overrides = light_overrides_per_task[task_id]
+                    if light_overrides is not None:
+                        env_kwargs["light_overrides"] = light_overrides
+            
+            if robot_base_pos_override_per_task is not None:
+                task_id = int(self.task_ids[env_id])
+                if 0 <= task_id < len(robot_base_pos_override_per_task):
+                    robot_base_pos_override = robot_base_pos_override_per_task[task_id]
+                    if robot_base_pos_override is not None:
+                        env_kwargs["robot_base_pos_override"] = robot_base_pos_override
 
             env_fn_params.append(env_kwargs)
             task_descriptions.append(task.language)
