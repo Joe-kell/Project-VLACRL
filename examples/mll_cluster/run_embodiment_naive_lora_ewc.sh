@@ -91,6 +91,7 @@ source "examples/mll_cluster/common_functions.sh"
 # Extract config tag and derive eval config name
 CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
 EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+GLOBAL_STEP=$(get_default_global_step "$CONFIG_NAME")
 FIRST_TASK_ID=$(get_first_task_id "$CONFIG_NAME")
 
 # Main training loop
@@ -130,7 +131,7 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
             # CONFIG_TAG is empty, use path as-is (no transformation needed)
             PREV_LOG_DIR_TRANSFORMED="$PREV_LOG_DIR"
         fi
-        EXISTING_FIRST_TASK_CHECKPOINT="${PREV_LOG_DIR_TRANSFORMED}/checkpoints/global_step_10/actor"
+        EXISTING_FIRST_TASK_CHECKPOINT="${PREV_LOG_DIR_TRANSFORMED}/checkpoints/global_step_${GLOBAL_STEP}/actor"
         if [ -d "$EXISTING_FIRST_TASK_CHECKPOINT" ]; then
             # First task weights exist - load them and train for 1 epoch to generate rollouts for Fisher
             CHECKPOINT_PATH="$EXISTING_FIRST_TASK_CHECKPOINT"
@@ -161,7 +162,7 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
         fi
         
         # Use the transformed path
-        CHECKPOINT_PATH="${PREV_LOG_DIR_TRANSFORMED}/checkpoints/global_step_10/actor"
+        CHECKPOINT_PATH="${PREV_LOG_DIR_TRANSFORMED}/checkpoints/global_step_${GLOBAL_STEP}/actor"
         
         # Additional validation: ensure CHECKPOINT_PATH is a valid relative or absolute path
         if [[ "$CHECKPOINT_PATH" =~ ^/checkpoints/ ]]; then

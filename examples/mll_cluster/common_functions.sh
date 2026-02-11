@@ -64,3 +64,18 @@ derive_eval_config_name() {
     fi
     echo "$eval_config"
 }
+
+# Get the default global_step checkpoint index for a given config.
+# For standard configs (e.g., libero_spatial), we default to 10.
+# For "long" configs (e.g., libero_10_grpo_openvlaoft_long), we use 5
+# to match runner.max_epochs/save_interval in the long config.
+get_default_global_step() {
+    local config_name="$1"
+    local config_tag
+    config_tag=$(extract_config_tag "$config_name")
+    if [ "$config_tag" = "long" ]; then
+        echo "5"
+    else
+        echo "10"
+    fi
+}

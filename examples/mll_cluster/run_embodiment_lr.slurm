@@ -37,6 +37,7 @@ source "examples/mll_cluster/common_functions.sh"
 # Extract config tag and derive eval config name
 CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
 EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+GLOBAL_STEP=$(get_default_global_step "$CONFIG_NAME")
 
 # Parse TASK_INPUT to determine if it's a single task or a range
 if [[ "$TASK_INPUT" == *,* ]]; then
@@ -218,7 +219,7 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
         fi
         
         PREV_TASK_LOG_DIR="$PREV_TASK_LOG_DIR_TRANSFORMED"
-        CHECKPOINT_PATH="${PREV_TASK_LOG_DIR}/checkpoints/global_step_10/actor"
+        CHECKPOINT_PATH="${PREV_TASK_LOG_DIR}/checkpoints/global_step_${GLOBAL_STEP}/actor"
         
         # Additional validation: ensure CHECKPOINT_PATH is a valid relative or absolute path
         if [[ "$CHECKPOINT_PATH" =~ ^/checkpoints/ ]]; then

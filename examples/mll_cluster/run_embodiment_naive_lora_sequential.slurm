@@ -47,6 +47,8 @@ source "examples/mll_cluster/common_functions.sh"
 # Extract config tag and derive eval config name
 CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
 EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+# Determine default global_step for checkpoints based on config
+GLOBAL_STEP=$(get_default_global_step "$CONFIG_NAME")
 
 if [ -z "$TASK_IDS_STR" ]; then
     echo "ERROR: Missing required argument"
@@ -239,7 +241,7 @@ for i in "${!TASK_IDS_ARRAY[@]}"; do
     fi
     
     # Update previous checkpoint path for next iteration
-    PREV_CHECKPOINT_PATH="${TASK_LOG_DIR}/checkpoints/global_step_10/actor"
+    PREV_CHECKPOINT_PATH="${TASK_LOG_DIR}/checkpoints/global_step_${GLOBAL_STEP}/actor"
     
     echo ""
     echo "========================================="
