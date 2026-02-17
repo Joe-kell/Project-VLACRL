@@ -2,11 +2,15 @@
 # Common functions for mll_cluster run_embodiment scripts
 
 # Get the first task ID for a given config
-# libero_10 (long) starts from task 3, all others start from task 0
+# libero_10 (long) starts from task 3, libero_object starts from task 5, all others start from task 0
 get_first_task_id() {
     local config_name="$1"
     local config_tag=$(extract_config_tag "$config_name")
-    if [ "$config_tag" = "long" ]; then
+    
+    # Check if config is for libero_object
+    if [[ "$config_tag" == "object" ]]; then
+        echo "5"
+    elif [ "$config_tag" = "long" ]; then
         echo "3"
     else
         echo "0"
