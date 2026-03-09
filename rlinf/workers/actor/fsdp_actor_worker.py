@@ -32,7 +32,10 @@ from tqdm import tqdm
 import rlinf.algorithms  # noqa: F401
 from rlinf.algorithms.registry import actor_loss, calculate_adv_and_returns
 from rlinf.algorithms.utils import preprocess_advantages_inputs, preprocess_loss_inputs
-from rlinf.custom.libero_trajectory_dataset import LiberoSFTDataset
+from rlinf.custom.libero_trajectory_dataset import LiberoSFTDataset, make_collate_fn, worker_init_fn
+from rlinf.models import get_model_config_and_processor
+from rlinf.config import torch_dtype_from_precision
+
 from rlinf.custom.loss import (
     behavior_cloning_ce_loss,
     behavior_cloning_loss_with_reference_logits,
@@ -161,14 +164,23 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             use_preprocessed=True,
         )
 
+        # Create collate_fn with the processor (only need one copy)
+        _, input_processor = get_model_config_and_processor(self.cfg.actor)
+        precision = torch_dtype_from_precision(self.cfg.actor.model.precision)
+        collate_fn = make_collate_fn(self.cfg, input_processor, precision)
+
         self.sft_dataloader = cycle(
             DataLoader(
                 self.sft_dataset,
                 batch_size=self.cfg.actor.micro_batch_size,
                 shuffle=True,
-                num_workers=0,
-                pin_memory=False,
+                num_workers=8,
+                pin_memory=True,
                 drop_last=True,
+                prefetch_factor=4,
+                collate_fn=collate_fn,
+                worker_init_fn=worker_init_fn,
+                persistent_workers=True,
             )
         )
 

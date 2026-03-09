@@ -26,11 +26,13 @@ fi
 DEFAULT_CONFIG="libero_spatial_grpo_openvlaoft_bcrl"
 DEFAULT_BC_COEFF=0.03
 DEFAULT_NUM_TASKS=5
+DEFAULT_SEED=1234
 
 # Get arguments
 CONFIG_NAME="${1:-$DEFAULT_CONFIG}"
 BC_COEFF="${2:-$DEFAULT_BC_COEFF}"
 NUM_TASKS="${3:-$DEFAULT_NUM_TASKS}"
+SEED="${4:-$DEFAULT_SEED}"
 
 # Get REPO_PATH (run_embodiment.sh will set this, but we need it for log dir)
 export EMBODIED_PATH="$SCRIPT_DIR"
@@ -52,7 +54,7 @@ else
 fi
 
 # Base log directory
-BASE_LOG_DIR="${REPO_PATH}/logs/bcrl_logit/${BC_COEFF_FORMATTED}"
+BASE_LOG_DIR="${REPO_PATH}/logs/libero_spatial/bcrl_logit/${BC_COEFF_FORMATTED}/seed_${SEED}"
 mkdir -p "${BASE_LOG_DIR}"
 
 # ============================================================================
@@ -65,6 +67,7 @@ echo "========================================================================"
 echo "Config:         $CONFIG_NAME"
 echo "BC Coefficient: $BC_COEFF"
 echo "Num Tasks:      $NUM_TASKS (0 to $((NUM_TASKS-1)))"
+echo "Seed:	      $SEED"
 echo "Base Log Dir:   $BASE_LOG_DIR"
 echo "========================================================================"
 echo ""
@@ -73,9 +76,9 @@ echo ""
 # Training Loop
 # ============================================================================
 
-PREV_CHECKPOINT_PATH="./logs/bcrl_logit/03/task_4/checkpoints/global_step_5/actor"
+PREV_CHECKPOINT_PATH="./logs/libero_spatial/bcrl_logit/03/seed_1234/task_5/checkpoints/global_step_10/actor"
 
-for TASK_ID in $(seq 5 $((NUM_TASKS-1+3))); do
+for TASK_ID in $(seq 6 $((NUM_TASKS-1+5))); do
     echo ""
     echo "========================================================================"
     echo "Training on Task ${TASK_ID}"
@@ -86,10 +89,10 @@ for TASK_ID in $(seq 5 $((NUM_TASKS-1+3))); do
     mkdir -p "${TASK_LOG_DIR}"
     
     # Build hydra overrides
-    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] algorithm.use_experience_replay=True algorithm.bc_coeff=${BC_COEFF} actor.preallocate=0 actor.micro_batch_size=16 +algorithm.use_reference_logits_bc=True +algorithm.use_cached_bc_logits=True actor.enable_offload=True rollout.enable_offload=True"
+    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] algorithm.use_experience_replay=True algorithm.bc_coeff=${BC_COEFF} actor.preallocate=15 actor.micro_batch_size=16 +algorithm.use_reference_logits_bc=True +algorithm.use_cached_bc_logits=True actor.enable_offload=True rollout.enable_offload=True actor.seed=${SEED}"
     
     # For tasks after 0, add the checkpoint path from previous task
-    if [ $TASK_ID -gt 3 ]; then
+    if [ $TASK_ID -gt 5 ]; then
         if [ -z "$PREV_CHECKPOINT_PATH" ]; then
             echo "ERROR: Previous checkpoint path is empty for task ${TASK_ID}"
             exit 1
@@ -124,7 +127,7 @@ for TASK_ID in $(seq 5 $((NUM_TASKS-1+3))); do
     
     # Find the checkpoint directory for this task
     # Assumes checkpoint is saved at: {TASK_LOG_DIR}/checkpoints/global_step_10/actor/
-    CHECKPOINT_DIR="${TASK_LOG_DIR}/checkpoints/global_step_5/actor"
+    CHECKPOINT_DIR="${TASK_LOG_DIR}/checkpoints/global_step_10/actor"
     
     if [ ! -d "$CHECKPOINT_DIR" ]; then
         echo ""

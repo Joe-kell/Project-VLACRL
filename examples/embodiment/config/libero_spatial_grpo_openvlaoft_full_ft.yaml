@@ -119,6 +119,7 @@ actor:
     queue_size: 0
   training_backend: "fsdp"
   checkpoint_load_path: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-spatial-traj1/"
+  checkpoint_save_path: "../results"
   micro_batch_size: 32
   global_batch_size: 8192
   seed: 1234
@@ -142,7 +143,7 @@ actor:
     policy_setup: "widowx_bridge"
     vh_mode: "a0"
     image_size: [224, 224]
-    is_lora: True
+    is_lora: False
     lora_rank: 32
     partial_finetune: False
     layers_to_train: 50

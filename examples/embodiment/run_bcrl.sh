@@ -52,7 +52,7 @@ else
 fi
 
 # Base log directory
-BASE_LOG_DIR="${REPO_PATH}/logs/bcrl/${BC_COEFF_FORMATTED}"
+BASE_LOG_DIR="${REPO_PATH}/logs/libero_object/bcrl/${BC_COEFF_FORMATTED}"
 mkdir -p "${BASE_LOG_DIR}"
 
 # ============================================================================
@@ -73,9 +73,9 @@ echo ""
 # Training Loop
 # ============================================================================
 
-PREV_CHECKPOINT_PATH="./logs/bcrl/03/task_3/checkpoints/global_step_5/actor"
+PREV_CHECKPOINT_PATH="./logs/libero_object/bcrl/03/task_5/checkpoints/global_step_10/actor"
 
-for TASK_ID in $(seq 4 $((NUM_TASKS-1+3))); do
+for TASK_ID in $(seq 6 $((NUM_TASKS-1+5))); do
     echo ""
     echo "========================================================================"
     echo "Training on Task ${TASK_ID}"
@@ -86,10 +86,10 @@ for TASK_ID in $(seq 4 $((NUM_TASKS-1+3))); do
     mkdir -p "${TASK_LOG_DIR}"
     
     # Build hydra overrides
-    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] algorithm.use_experience_replay=True algorithm.bc_coeff=${BC_COEFF} actor.preallocate=10 actor.micro_batch_size=16 actor.seed=42"
+    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] algorithm.use_experience_replay=True algorithm.bc_coeff=${BC_COEFF} actor.preallocate=0 actor.micro_batch_size=16 actor.seed=42"
     
     # For tasks after 0, add the checkpoint path from previous task
-    if [ $TASK_ID -gt 3 ]; then
+    if [ $TASK_ID -gt 5 ]; then
         if [ -z "$PREV_CHECKPOINT_PATH" ]; then
             echo "ERROR: Previous checkpoint path is empty for task ${TASK_ID}"
             exit 1
@@ -124,7 +124,7 @@ for TASK_ID in $(seq 4 $((NUM_TASKS-1+3))); do
     
     # Find the checkpoint directory for this task
     # Assumes checkpoint is saved at: {TASK_LOG_DIR}/checkpoints/global_step_10/actor/
-    CHECKPOINT_DIR="${TASK_LOG_DIR}/checkpoints/global_step_5/actor"
+    CHECKPOINT_DIR="${TASK_LOG_DIR}/checkpoints/global_step_10/actor"
     
     if [ ! -d "$CHECKPOINT_DIR" ]; then
         echo ""

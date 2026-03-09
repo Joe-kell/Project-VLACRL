@@ -1,6 +1,6 @@
 defaults:
-  - env/train: libero_10_grpo
-  - env/eval: libero_10
+  - env/train: libero_object
+  - env/eval: libero_object
   - override hydra/job_logging: stdout
 
 hydra:
@@ -13,8 +13,8 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: all
-  # sray_object_store_memory: 461708984320  # Ray object store memory in bytes (default: ~430GB)
+    actor,env,rollout: 4-7
+  ray_object_store_memory: 461708984320  # Ray object store memory in bytes (default: ~430GB)
 
 runner:
   task_type: embodied
@@ -29,7 +29,7 @@ runner:
 
   only_eval: False
   val_check_interval: -1
-  save_interval: 5
+  save_interval: 10
   seq_length: 4096
   max_prompt_length: 128
 
@@ -45,8 +45,8 @@ algorithm:
   n_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   n_eval_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   num_group_envs: 8
-  rollout_epoch: 16
-  eval_rollout_epoch: 20
+  rollout_epoch: 8
+  eval_rollout_epoch: 8
   reward_type: step_level  # step_level or chunk_level
   logprob_type: token_level
   entropy_type: token_level
@@ -96,7 +96,7 @@ env:
     num_envs: 80
     eval_per_task: ${int_div:${env.eval.num_envs}, 10}
   enable_offload: False
-  fixed_task_ids: null
+  fixed_task_ids: null  # First task for libero_object is task 5
   log_trajectories: False
 
 rollout:
@@ -107,8 +107,8 @@ rollout:
     queue_size: 0
   mode: "colocate"
   generation_backend: "huggingface"
-  model_dir: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero10-traj1/"
-  enable_offload: False 
+  model_dir: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-object-traj1/"
+  enable_offload: True
   pipeline_stage_num: 1
 
 actor:
@@ -118,13 +118,12 @@ actor:
     queue_name: "replay_buffer"
     queue_size: 0
   training_backend: "fsdp"
-  checkpoint_load_path: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero10-traj1/"
-  checkpoint_save_path: "../results"
-  micro_batch_size: 32
-  global_batch_size: 8192
+  checkpoint_load_path: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-object-traj1/"
+  micro_batch_size: 16
+  global_batch_size: 4096 # 8192
   seed: 1234
-  enable_offload: False
-  preallocate: 12   # preallocates for actor worker (GB)
+  enable_offload: True
+  preallocate: 0
 
   model:
     model_name: "openvla_oft"
@@ -132,7 +131,7 @@ actor:
     action_dim: 7
     num_action_chunks: 8
     use_proprio: False
-    unnorm_key: libero_10_no_noops
+    unnorm_key: libero_object_no_noops
     center_crop: True
 
     precision: "bf16"
@@ -163,7 +162,7 @@ actor:
 
   tokenizer:
     tokenizer_type: "HuggingFaceTokenizer"
-    tokenizer_model: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero10-traj1/"
+    tokenizer_model: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-object-traj1/"
     use_fast: False
     trust_remote_code: True
     padding_side: "right"

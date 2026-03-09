@@ -13,7 +13,7 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: all
+    actor,env,rollout: 4-7
 
 runner:
   task_type: embodied
@@ -122,7 +122,7 @@ actor:
   micro_batch_size: 16
   global_batch_size: 8192
   seed: 1234
-  enable_offload: False
+  enable_offload: True
   preallocate: 22   # preallocates for actor worker (GB)
 
   model:

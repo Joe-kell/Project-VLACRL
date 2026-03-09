@@ -11,6 +11,71 @@ from rlinf.models import get_model_config_and_processor
 from rlinf.models.embodiment.model_utils import prepare_observations
 
 
+def worker_init_fn(worker_id):
+    """Reset HDF5 file handles in forked worker processes."""
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is not None:
+        dataset = worker_info.dataset
+        dataset.file_handles = {}
+
+
+def make_collate_fn(cfg, input_processor, precision):
+    """Factory that returns a collate_fn which batches raw data and runs
+    the HuggingFace processor ONCE per micro-batch instead of per sample."""
+
+    simulator_type = cfg.env.train.simulator_type
+    model_name = cfg.actor.model.model_name
+    use_proprio = cfg.actor.model.use_proprio
+    max_length = cfg.runner.max_prompt_length
+
+    def collate_fn(samples):
+        # samples: list of dicts with 'obs_rgb', 'task_desc', 'actions', optionally logits
+
+        # List of [H,W,C] uint8 numpy -> list of float tensors
+        images = [torch.from_numpy(s["obs_rgb"]).float() for s in samples]
+        task_descs = [s["task_desc"] for s in samples]
+
+        # Build the raw_obs batch the same way the env would
+        raw_obs_batch = {
+            "task_descriptions": task_descs,
+            "images_and_states": {"full_image": images},
+        }
+
+        # Run processor ONCE for the entire batch
+        processed_obs = prepare_observations(
+            simulator_type=simulator_type,
+            model_name=model_name,
+            raw_obs=raw_obs_batch,
+            use_proprio=use_proprio,
+            max_length=max_length,
+            processor=input_processor,
+            precision=precision,
+            device=torch.device("cpu"),
+        )
+
+        # Stack actions
+        actions = torch.stack([torch.from_numpy(s["actions"]).float() for s in samples])
+
+        output = {
+            **processed_obs,
+            "actions": actions,
+        }
+
+        # Handle optional logits
+        if "raw_action_logits" in samples[0] and samples[0]["raw_action_logits"] is not None:
+            output["raw_action_logits"] = torch.stack(
+                [torch.from_numpy(s["raw_action_logits"]).float() for s in samples]
+            )
+        elif "processed_action_logits" in samples[0] and samples[0]["processed_action_logits"] is not None:
+            output["processed_action_logits"] = torch.stack(
+                [torch.from_numpy(s["processed_action_logits"]).float() for s in samples]
+            )
+
+        return output
+
+    return collate_fn
+
+
 class LiberoSFTDataset(Dataset):
     def __init__(
         self,
@@ -45,7 +110,6 @@ class LiberoSFTDataset(Dataset):
         self.demos_per_task = demos_per_task
         self.num_action_chunks = cfg.actor.model.num_action_chunks
 
-        _, self.input_processor = get_model_config_and_processor(cfg.actor)
         self.precision = torch_dtype_from_precision(cfg.actor.model.precision)
 
         self.trajectories = []
@@ -61,20 +125,20 @@ class LiberoSFTDataset(Dataset):
         self.sample_indices = []
         for path, demo_name, traj_len, task_desc in self.trajectories:
             valid_len = traj_len - self.num_action_chunks + 1
-
             if valid_len > 0:
                 for t in range(valid_len):
                     self.sample_indices.append((path, demo_name, t, task_desc))
 
         self.sample_indices = self.sample_indices[rank::world_size]
-
         self.file_handles = {}
+
+        print(f"LiberoSFTDataset: {len(self.sample_indices)} samples (rank {rank}/{world_size})")
 
     def _extract_task_description(self, filename):
         name = filename.replace(".hdf5", "")
         parts = name.split("_")
         if parts[-1] == "demo":
-            parts = parts[:-1]  # remove the word demo
+            parts = parts[:-1]
         return " ".join(parts)
 
     def __len__(self):
@@ -88,51 +152,35 @@ class LiberoSFTDataset(Dataset):
         f = self.file_handles[path]
 
         demo = f["data"][demo_name]
+
+        # Return RAW numpy — no processor call here
         obs = np.array(demo["obs"]["agentview_rgb"][timestep])
         actions = np.array(
             demo["actions"][timestep : timestep + self.num_action_chunks]
         )
 
-        raw_action_logits = None
-        processed_action_logits = None
-        if self.logits_type == "raw" and "raw_action_logits" in demo.keys():
-            raw_action_logits = np.array(demo["raw_action_logits"][timestep])
-        elif (
-            self.logits_type == "processed" and "processed_action_logits" in demo.keys()
-        ):
-            processed_action_logits = np.array(
-                demo["processed_action_logits"][timestep]
-            )
-
         assert actions.shape[0] == self.num_action_chunks, (
             f"Expected {self.num_action_chunks} actions, got {actions.shape[0]}"
         )
 
-        raw_obs_batch = {
-            "task_descriptions": [task_desc],
-            "images_and_states": {"full_image": [torch.from_numpy(obs).float()]},
-        }
-
-        processed_obs = prepare_observations(
-            simulator_type=self.cfg.env.train.simulator_type,
-            model_name=self.cfg.actor.model.model_name,
-            raw_obs=raw_obs_batch,
-            use_proprio=self.cfg.actor.model.use_proprio,
-            max_length=self.cfg.runner.max_prompt_length,
-            processor=self.input_processor,
-            precision=self.precision,
-        )
-        processed_obs = {k: v.squeeze(0) for k, v in processed_obs.items()}
-        action_chunks = torch.from_numpy(actions).float()
         output = {
-            **processed_obs,
-            "actions": action_chunks,
+            "obs_rgb": obs,         # [H, W, C] uint8 numpy
+            "task_desc": task_desc,  # str
+            "actions": actions,      # [C, D] float numpy
         }
 
-        if raw_action_logits is not None:
-            output["raw_action_logits"] = raw_action_logits
-        elif processed_action_logits is not None:
-            output["processed_action_logits"] = processed_action_logits
+        # Optional logits (still raw numpy)
+        if self.logits_type == "raw" and "raw_action_logits" in demo.keys():
+            output["raw_action_logits"] = np.array(demo["raw_action_logits"][timestep])
+        else:
+            output["raw_action_logits"] = None
+
+        if self.logits_type == "processed" and "processed_action_logits" in demo.keys():
+            output["processed_action_logits"] = np.array(
+                demo["processed_action_logits"][timestep]
+            )
+        else:
+            output["processed_action_logits"] = None
 
         return output
 
@@ -147,6 +195,8 @@ class LiberoSFTDataset(Dataset):
     config_name="libero_spatial_grpo_openvlaoft_bcrl_logit",
 )
 def main(cfg):
+    from itertools import cycle
+    import time
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.create(cfg)
@@ -154,6 +204,7 @@ def main(cfg):
     EMBODIED_PATH = os.path.dirname(os.path.abspath(__file__))
     REPO_PATH = os.path.dirname(os.path.dirname(EMBODIED_PATH))
     LIBERO_REPO_PATH = os.path.join(REPO_PATH, "LIBERO")
+
     sft_dataset = LiberoSFTDataset(
         cfg=cfg,
         root_dir=LIBERO_REPO_PATH,
@@ -165,30 +216,39 @@ def main(cfg):
         logits_type="processed",
     )
 
-    from itertools import cycle
+    # Create processor once, pass to collate_fn
+    _, input_processor = get_model_config_and_processor(cfg.actor)
+    precision = torch_dtype_from_precision(cfg.actor.model.precision)
+    collate_fn = make_collate_fn(cfg, input_processor, precision)
 
     sft_dataloader = cycle(
         DataLoader(
             sft_dataset,
             batch_size=16,
             shuffle=True,
-            num_workers=0,
-            pin_memory=False,
+            num_workers=8,
+            pin_memory=True,
+            drop_last=True,
+            prefetch_factor=4,
+            collate_fn=collate_fn,
+            worker_init_fn=worker_init_fn,
+            persistent_workers=True,
         )
     )
     sft_iterator = iter(sft_dataloader)
 
-    import time
-
     times = []
-    for _ in range(30):
+    for i in range(30):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         batch = next(sft_iterator)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         times.append(t1 - t0)
+        if i > 0:
+            print(f"Step {i}: {t1-t0:.4f}s")
 
+    print(f"\nAvg (excluding warmup): {np.mean(times[1:]):.4f}s")
     print(f"input_ids shape: {batch['input_ids'].shape}")
     print(f"attention_mask shape: {batch['attention_mask'].shape}")
     print(f"pixel_values shape: {batch['pixel_values'].shape}")
@@ -196,8 +256,6 @@ def main(cfg):
 
 
 if __name__ == "__main__":
-    import os
-
     EMBODIED_PATH = os.path.dirname(os.path.abspath(__file__))
     os.environ["EMBODIED_PATH"] = EMBODIED_PATH
     REPO_PATH = os.path.dirname(os.path.dirname(EMBODIED_PATH))

@@ -10,7 +10,7 @@ fi
 SCRIPT_PATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_PATH=$(dirname "$SCRIPT_PATH")
 RAY_HEAD_IP_FILE=$REPO_PATH/ray_utils/ray_head_ip.txt
-RAY_PORT=${MASTER_PORT:-29500}  # Default port for Ray, can be modified if needed
+RAY_PORT=${RAY_PORT:-29500}  # Default port for Ray, can be modified if needed
 
 # Ensure Ray temp directory is user-writable under the repo, not /tmp
 # if [ -z "$RAY_TMPDIR" ]; then

@@ -468,6 +468,11 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
         print(
             f"Partial finetune enabled. Training last {layers_to_train} layers. Total params: {len(params)}")
 
+    if not cfg.is_lora and not cfg.partial_finetune:
+        for param in model.parameters():
+            param.requires_grad = True
+        print("Full base model set to trainable (no LoRA, no partial finetune).")
+
     if hasattr(cfg, "ckpt_path") and cfg.ckpt_path is not None:
         print(f"LOADING MODEL CHECKPOINT from: {cfg.ckpt_path}")
         print(f"Checkpoint exists: {os.path.exists(cfg.ckpt_path)}")
