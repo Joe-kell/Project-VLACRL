@@ -288,35 +288,22 @@ Complete documentation for RLinf can be found [**Here**](https://rlinf.readthedo
 
 **Advanced Features**
 
-  - [5D Parallelism Configuration for Megatron-LM](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/advance/5D.html)
   - [LoRA Integration for efficient fine-tuning](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/advance/lora.html)
-  - [Switch between different versions of SGLang](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/advance/version.html)
   - [Checkpoint Resume and Recovery Support](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/advance/resume.html)
 
-**Extending The Framework:**
-
-  - [Adding new Environments](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/extend/new_env.html)
-  - [Adding new Models with FSDP+Huggingface backend](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/extend/new_model_fsdp.html)
-  - [Adding new Models with Megatron+SGLang backend](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/extend/new_model_megatron.html)
-
-**Blogs**
-
-  - [Comparison with VeRL](https://rlinf.readthedocs.io/en/latest/rst_source/blog/compare_with_verl.html)
-
-## Build Status
-
-| Type             | Status |
-| :--------------: | :----: |
-| Reasoning RL-MATH | [![Build Status](https://github.com/RLinf/RLinf/actions/workflows/math_e2e.yml/badge.svg)](https://github.com/RLinf/RLinf/actions/workflows/math_e2e.yml) |
 | Embodied RL-VLA   | [![Build Status](https://github.com/RLinf/RLinf/actions/workflows/embodied_e2e.yml/badge.svg)](https://github.com/RLinf/RLinf/actions/workflows/embodied_e2e.yml) |
 
 
-## Contribution Guidelines
-We welcome contributions to RLinf. Please read [contribution guide](https://rlinf.readthedocs.io/en/latest/index.html#contribution-guidelines) before taking action.
 
-## Citation and Acknowledgement
 
-If you find **RLinf** helpful, please cite the paper:
+**Acknowledgements**
+RLinf has been inspired by, and benefits from, the ideas and tooling of the broader open-source community.
+In particular, we would like to thank the teams and contributors behind VeRL, AReaL, Megatron-LM, SGLang, and PyTorch Fully Sharded Data Parallel (FSDP), and if we have inadvertently missed your project or contribution, please open an issue or a pull request so we can properly credit you.
+
+For more details on RLinf's architecture, execution modes, and APIs, 
+see the [upstream RLinf documentation](https://rlinf.readthedocs.io/) 
+(or wherever it's hosted).
+
 
 ```bibtex
 @misc{yu2025rlinfflexibleefficientlargescale,
@@ -329,25 +316,3 @@ If you find **RLinf** helpful, please cite the paper:
   url={https://arxiv.org/abs/2509.15965}, 
 }
 ```
-
-If you use RL+VLA in RLinf, you can also cite our empirical study paper:
-```bibtex
-@misc{liu2025rlbringvlageneralization,
-  title={What Can RL Bring to VLA Generalization? An Empirical Study}, 
-  author={Jijia Liu and Feng Gao and Bingwen Wei and Xinlei Chen and Qingmin Liao and Yi Wu and Chao Yu and Yu Wang},
-  year={2025},
-  eprint={2505.19789},
-  archivePrefix={arXiv},
-  primaryClass={cs.LG},
-  url={https://arxiv.org/abs/2505.19789}, 
-}
-```
-
-**Acknowledgements**
-RLinf has been inspired by, and benefits from, the ideas and tooling of the broader open-source community.
-In particular, we would like to thank the teams and contributors behind VeRL, AReaL, Megatron-LM, SGLang, and PyTorch Fully Sharded Data Parallel (FSDP), and if we have inadvertently missed your project or contribution, please open an issue or a pull request so we can properly credit you.
-
-**Contact:**
-We welcome applications from Postdocs, PhD/Master's students, and interns. Join us in shaping the future of RL infrastructure and embodied AI!
-- Chao Yu: zoeyuchao@gmail.com
-- Yu Wang: yu-wang@tsinghua.edu.cn

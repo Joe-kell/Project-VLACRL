@@ -17,13 +17,6 @@ MAX_EPOCH=$3
 CONFIG_NAME=${4:-mll_cluster/libero_spatial_grpo_openvlaoft}
 SEED=${5:-1234}
 
-# Source common functions
-source "examples/mll_cluster/common_functions.sh"
-
-# Extract config tag and derive eval config name
-CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
-EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
-
 if [ -z "$TASK_IDS_STR" ]; then
     echo "ERROR: Missing required argument"
     echo "Usage: bash examples/mll_cluster/run_embodiment_naive_lora_multitask.sh TASK_IDS [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]"
@@ -51,6 +44,37 @@ for task_id in "${TASK_IDS_ARRAY[@]}"; do
     fi
 done
 
+mkdir -p logs/slurm
+mkdir -p logs/naive_lora_multitask
+
+# Print job information (only if running under SLURM)
+if [ -n "$SLURM_JOB_ID" ]; then
+    echo "Job ID: $SLURM_JOB_ID"
+    echo "Job Name: $SLURM_JOB_NAME"
+    echo "Node: $SLURM_NODELIST"
+    echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
+    echo "GPUs allocated: $SLURM_GPUS_ON_NODE"
+fi
+echo "Start Time: $(date)"
+echo "Working Directory: $(pwd)"
+echo ""
+
+# Change to repo root
+if [ -n "$SLURM_SUBMIT_DIR" ]; then
+    cd "$SLURM_SUBMIT_DIR"
+else
+    SCRIPT_DIR="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    REPO_ROOT=$(dirname $(dirname "$SCRIPT_DIR"))
+    cd "$REPO_ROOT"
+fi
+
+# Source common functions
+source "examples/mll_cluster/common_functions.sh"
+
+# Extract config tag and derive eval config name
+CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
+EVAL_CONFIG_NAME=$(derive_eval_config_name "$CONFIG_NAME")
+
 # Sort task IDs and create formatted string for logging
 IFS=$'\n' sorted_task_ids=($(sort -n <<<"${TASK_IDS_ARRAY[*]}"))
 unset IFS
@@ -63,6 +87,7 @@ TASK_DIR_STR=$(IFS='_'; echo "${sorted_task_ids[*]}")
 
 # Determine LOG_DIR based on checkpoint path
 # Check if LOG_DIR is already set (e.g., by SLURM script with config tag injection)
+# When building here, inject CONFIG_TAG for consistency with slurm
 if [ -z "$LOG_DIR" ]; then
     if [ -n "$CHECKPOINT_PATH" ]; then
         # Extract global_step from checkpoint path
@@ -78,25 +103,18 @@ if [ -z "$LOG_DIR" ]; then
         # Standard case: use task IDs
         LOG_DIR="./logs/naive_lora_multitask/tasks_${TASK_DIR_STR}_seed${SEED}"
     fi
+    # Inject config tag when building LOG_DIR (for direct bash runs)
+    if [ -n "$CONFIG_TAG" ]; then
+        LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$LOG_DIR" "$CONFIG_TAG")
+        if [ -n "$LOG_DIR_TRANSFORMED" ]; then
+            LOG_DIR="$LOG_DIR_TRANSFORMED"
+        fi
+    fi
 else
     # LOG_DIR is already set (e.g., by SLURM script with config tag injection)
     echo "Using pre-set LOG_DIR: $LOG_DIR"
 fi
 
-# Print job information (only if running under SLURM)
-if [ -n "$SLURM_JOB_ID" ]; then
-    echo "Job ID: $SLURM_JOB_ID"
-    echo "Job Name: $SLURM_JOB_NAME"
-    echo "Node: $SLURM_NODELIST"
-    echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
-    echo "GPUs allocated: $SLURM_GPUS_ON_NODE"
-fi
-echo "Start Time: $(date)"
-echo "Working Directory: $(pwd)"
-echo ""
-
-mkdir -p logs/slurm
-mkdir -p logs/naive_lora_multitask
 export LOG_DIR
 
 # Set experiment name based on LOG_DIR (for wandb)
