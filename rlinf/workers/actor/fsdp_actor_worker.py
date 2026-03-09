@@ -40,6 +40,9 @@ from rlinf.custom.loss import (
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import (
     FSDPModelManager,
 )
+from rlinf.hybrid_engines.fsdp.fsdp2_model_manager import (
+    FSDP2ModelManager,
+)
 from rlinf.models import get_model
 from rlinf.models.embodiment.model_utils import (
     actor_forward,

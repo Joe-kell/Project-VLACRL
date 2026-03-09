@@ -20,6 +20,7 @@ from rlinf.runners.embodied_runner import EmbodiedRunner
 from rlinf.scheduler import Cluster
 from rlinf.utils.placement import HybridComponentPlacement
 from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
+from rlinf.workers.actor.fsdp2_actor_worker import EmbodiedFSDP2Actor
 from rlinf.workers.env.env_worker import EnvWorker
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 from rlinf.workers.rollout.cnn.cnn_rollout_worker import CNNRolloutWorker
@@ -35,18 +36,24 @@ def main(cfg) -> None:
 
     # Export Ray object store memory from config to environment variable
     # This allows start_ray.sh to use the configured value
-    import os
-    ray_memory = cfg.cluster.get("ray_object_store_memory", 461708984320)
-    os.environ["RAY_OBJECT_STORE_MEMORY"] = str(ray_memory)
+    # import os
+    # ray_memory = cfg.cluster.get("ray_object_store_memory", 461708984320)
+    # os.environ["RAY_OBJECT_STORE_MEMORY"] = str(ray_memory)
 
     cluster = Cluster(num_nodes=cfg.cluster.num_nodes)
     component_placement = HybridComponentPlacement(cfg, cluster)
 
     # Create actor worker group
     actor_placement = component_placement.get_strategy("actor")
-    actor_group = EmbodiedFSDPActor.create_group(cfg).launch(
-        cluster, name=cfg.actor.group_name, placement_strategy=actor_placement
-    )
+    if cfg.actor.get("use_fsdp2", False):
+        actor_group = EmbodiedFSDP2Actor.create_group(cfg).launch(
+            cluster, name=cfg.actor.group_name, placement_strategy=actor_placement
+        )
+    else:
+        actor_group = EmbodiedFSDPActor.create_group(cfg).launch(
+            cluster, name=cfg.actor.group_name, placement_strategy=actor_placement
+        )
+
     # Create rollout worker group
     rollout_placement = component_placement.get_strategy("rollout")
     if cfg.rollout.get("use_cnn_policy", False):

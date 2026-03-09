@@ -74,7 +74,7 @@ class LiberoSFTDataset(Dataset):
         name = filename.replace(".hdf5", "")
         parts = name.split("_")
         if parts[-1] == "demo":
-                parts = parts[:-1]      # remove the word demo
+            parts = parts[:-1]  # remove the word demo
         return " ".join(parts)
 
     def __len__(self):

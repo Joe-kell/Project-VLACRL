@@ -14,7 +14,7 @@ cluster:
   num_nodes: 1
   component_placement:
     actor,env,rollout: all
-  sray_object_store_memory: 461708984320  # Ray object store memory in bytes (default: ~430GB)
+  # sray_object_store_memory: 461708984320  # Ray object store memory in bytes (default: ~430GB)
 
 runner:
   task_type: embodied
@@ -45,7 +45,7 @@ algorithm:
   n_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   n_eval_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   num_group_envs: 8
-  rollout_epoch: 16
+  rollout_epoch: 2
   eval_rollout_epoch: 20
   reward_type: step_level  # step_level or chunk_level
   logprob_type: token_level
@@ -96,7 +96,7 @@ env:
     num_envs: 80
     eval_per_task: ${int_div:${env.eval.num_envs}, 10}
   enable_offload: False
-  fixed_task_ids: null
+  fixed_task_ids: [0]
   log_trajectories: False
 
 rollout:
@@ -108,7 +108,7 @@ rollout:
   mode: "colocate"
   generation_backend: "huggingface"
   model_dir: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-spatial-traj1/"
-  enable_offload: False
+  enable_offload: True
   pipeline_stage_num: 1
 
 actor:
@@ -119,10 +119,11 @@ actor:
     queue_size: 0
   training_backend: "fsdp"
   checkpoint_load_path: "${oc.env:REPO_PATH}/model/Openvla-oft-SFT-libero-spatial-traj1/"
+  checkpoint_save_path: "../results"
   micro_batch_size: 32
-  global_batch_size: 8192
+  global_batch_size: 1024
   seed: 1234
-  enable_offload: False
+  enable_offload: True
   preallocate: 0   # preallocates for actor worker (GB)
 
   model:
@@ -151,6 +152,11 @@ actor:
     low_cpu_mem_usage: True
     trust_remote_code: True
     gradient_checkpointing: False
+
+    # fsdp configs
+    use_fsdp2: True
+    cpu_offload: True # extreme memory saving, but slows training
+    reshard_after_forward: True # free memory after forward pass
 
   optim:
     lr: 2.0e-5
