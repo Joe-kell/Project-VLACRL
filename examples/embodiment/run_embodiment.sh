@@ -61,7 +61,7 @@ if [[ ! "${CONFIG_NAME}" =~ _openvlaoft$ ]] && [[ ! "${CONFIG_NAME}" =~ _eval$ ]
 fi
 
 # Build log directory path with config tag if present
-# If LOG_DIR is already set (e.g., by mll_cluster scripts), use it as-is
+# If LOG_DIR is already set (e.g., by crl_experiment scripts), use it as-is
 # Otherwise, create default path with config tag if present
 if [ -z "${LOG_DIR}" ]; then
     if [ -n "${CONFIG_TAG}" ]; then

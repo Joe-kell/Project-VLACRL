@@ -168,7 +168,7 @@ def main():
     eval_cmd = [
         "bash",
         str(eval_script),
-        "mll_cluster/libero_spatial_cnn_eval",
+        "crl_experiment/libero_spatial_cnn_eval",
         f"rollout.checkpoint_path={checkpoint_path}",
     ]
     
