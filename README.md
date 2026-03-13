@@ -321,7 +321,7 @@ Download the modified RLDS dataset into your LIBERO datasets directory:
 hf download openvla/modified_libero_rlds --repo-type dataset --local-dir ./LIBERO/libero/datasets/
 ```
 
-This places the dataset at `./LIBERO/libero/datasets/libero_10_no_noops/`.
+This places the dataset at `./LIBERO/libero/datasets/`.
 
 ### Running
 ```bash
