@@ -1,405 +1,412 @@
 <h1 align="center">
-  <sub>Simple Recipe Works: Vision-Language-Action Models are Natural Continual Learners with Reinforcement Learning</sub>
+  Simple Recipe Works: Vision-Language-Action Models are<br>Natural Continual Learners with Reinforcement Learning
 </h1>
 
+<p align="center">
+  <a href="https://arxiv.org/abs/2603.11653"><img src="https://img.shields.io/badge/arXiv-Paper-red" alt="arXiv"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+</p>
 
-Official implementation. This codebase is built on top of [RLinf](https://arxiv.org/abs/2509.15965).
-
----
-
-## 1. Overview
-
-This supports training VLAs for robotic manipulation via reinforcement learning. The framework uses FSDP + Hugging Face for embodied experiments.
-
-**Supported Models:**
-- [OpenVLA](https://github.com/openvla/openvla)
-- [OpenVLA-OFT](https://github.com/moojink/openvla-oft)
-
-**Supported Simulators:**
-- **LIBERO** - Large-scale household manipulation (built on robosuite/MuJoCo)
-
-**Supported Algorithms:**
-- PPO (Proximal Policy Optimization)
-- GRPO (Group Relative Policy Optimization)
-
-For support of additional models and environments, please refer to the latest version of [RLinf](https://github.com/RLinf/RLinf).
+Official implementation for continual reinforcement learning (CRL) with Vision-Language-Action (VLA) models. Built on top of [RLinf](https://arxiv.org/abs/2509.15965).
 
 ---
 
-## 2. Installation
+## Table of Contents
 
-### Custom environment (Debian/Ubuntu)
+- [Overview](#overview)
+- [Installation](#installation)
+- [Downloading Models](#downloading-models)
+- [Quick Start](#quick-start)
+- [CRL Experiment Scripts](#crl-experiment-scripts)
+- [Configuration](#configuration)
+- [Evaluation](#evaluation)
+- [Precomputing Base Logits](#precomputing-base-logits)
+- [Architecture & Code Structure](#architecture--code-structure)
+- [Citation](#citation)
 
-Maybe add conda installation method...
+---
 
-1. **Common deps first:**
-   ```bash
-   uv sync
-   UV_TORCH_BACKEND=auto uv sync
-   ```
+## Overview
 
-2. **Embodied-specific:**
-   ```bash
-   uv sync --extra embodied
-   bash requirements/install_embodied_deps.sh
-   ```
+We study continual reinforcement learning for large Vision-Language-Action models and find that **simple sequential fine-tuning with LoRA** consistently avoids catastrophic forgetting, maintains plasticity, and preserves zero-shot generalization, often matching or surpassing dedicated continual learning methods.
 
-3. **Model-specific:**
-   ```bash
-   # OpenVLA
-   UV_TORCH_BACKEND=auto uv pip install -r requirements/openvla.txt --no-build-isolation
+This codebase provides:
 
-   # OpenVLA-OFT
-   UV_TORCH_BACKEND=auto uv pip install -r requirements/openvla_oft.txt --no-build-isolation
-   ```
+- **Sequential fine-tuning** (Seq. FT)
+- **CRL baselines** — EWC, Experience Replay, Dark Experience Replay, Weight Merge, SLCA
+- **Multitask oracle** — joint training upper bound
+- **Non-VLA baseline** — Simple CNN policy
+- **Evaluation tools** — per-task success, LoRA scaling analysis
 
-### Docker
+**Supported models:** [OpenVLA](https://github.com/openvla/openvla), [OpenVLA-OFT](https://github.com/moojink/openvla-oft)
+
+**Supported simulators:** [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) (Spatial, Object, Goal, Long suites)
+
+**Supported algorithms:** PPO, GRPO
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Linux (tested on Ubuntu 22.04/24.04)
+- NVIDIA GPU(s) with CUDA 12.x
+- Conda
+
+### Setup
 
 ```bash
-docker pull rlinf/rlinf:agentic-openvla-rlinf0.1-torch2.5.1         # OpenVLA
-docker pull rlinf/rlinf:agentic-openvlaoft-rlinf0.1-torch2.5.1      # OpenVLA-OFT
-
-docker run -it --gpus all \
-   --shm-size 100g \
-   --net=host \
-   --env NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
-   --name rlinf \
-   rlinf/rlinf:CHOSEN_IMAGE /bin/bash
-
-git clone https://github.com/RLinf/RLinf.git
+# 1. Clone the repository (includes bundled dependencies)
+git clone <TODO: add repo url>
 cd RLinf
+
+# 2. Create conda environment
+conda create -n rlinf python=3.11.10 -y
+conda activate rlinf
+
+# 3. Install core dependencies
+pip install -r requirements.txt
+
+# 4. Install bundled packages (included in this repo)
+cd transformers-openvla-oft && pip install -e . && cd ..
+cd openvla-oft && pip install -e . && cd ..
+cd LIBERO && pip install -e . && cd ..
+
+# 5. Install gymnasium
+pip install gymnasium
+```
+> **Optional:** For Flash Attention support (recommended for speed), install separately:
+> ```bash
+> pip install flash-attn --no-build-isolation
+> ```
+> **Note:** The repository includes `transformers-openvla-oft`, `openvla-oft`, and `LIBERO` as bundled directories. Steps 4–5 install them as editable packages — no separate cloning is needed.
+
+---
+
+## Downloading Models
+
+Pre-trained SFT checkpoints are available on Hugging Face. Download them into the `model/` directory at the repository root:
+
+| Model | Suite | Command |
+|-------|-------|---------|
+| OpenVLA-OFT SFT <br>(Spatial, 1 traj) | LIBERO-Spatial | `hf download Haozhan72/Openvla-oft-SFT-libero-spatial-traj1 --local-dir ./model/Openvla-oft-SFT-libero-spatial-traj1` |
+| OpenVLA-OFT SFT <br>(Object, 1 traj) | LIBERO-Object | `hf download Haozhan72/Openvla-oft-SFT-libero-object-traj1 --local-dir ./model/Openvla-oft-SFT-libero-object-traj1` |
+| OpenVLA-OFT SFT <br>(10-task, all traj) | LIBERO-10 | `hf download Haozhan72/Openvla-oft-SFT-libero10-trajall --local-dir ./model/Openvla-oft-SFT-libero10-trajall` |
+
+The default configs expect models at `./model/<hf-repo-name>`. To use a custom path, override these in the YAML config:
+
+```yaml
+rollout:
+  model_dir: /your/custom/path
+actor:
+  checkpoint_load_path: /your/custom/path
+  tokenizer:
+    tokenizer_model: /your/custom/path
+```
+
+### LIBERO Path
+
+The LIBERO environment path defaults to `./LIBERO` (the bundled copy). To use a different installation:
+
+```bash
+export LIBERO_REPO_PATH=/path/to/your/LIBERO
 ```
 
 ---
 
-## 3. CRL / Lifelong Experiments (LIBERO)
+## Quick Start
 
-For Continual Reinforcement Learning (CRL) experiments on LIBERO, use the scripts in `examples/crl_experiment/`. These support sequential task training, weight merge, EWC, multitask training, and more.
-
-**Prerequisites:** Same as above; ensure LIBERO and model paths are set in the config files under `examples/embodiment/config/crl_experiment/`.
-
-
-**Step 1: Download pre-trained model (OpenVLA)**
+After installation and model download, run a single-task sequential fine-tuning experiment:
 
 ```bash
-hf download gen-robot/openvla-7b-rlvla-warmup \
-  --local-dir /path/to/model/openvla-7b-rlvla-warmup/
-```
-
-**Step 2: Edit config** (`examples/embodiment/config/maniskill_ppo_openvla_quickstart.yaml`)
-
-- `cluster.component_placement`: set to `"0-3"` or `"0-7"` for 4/8 GPUs
-- `rollout.model_dir`: path to downloaded model
-- `actor.checkpoint_load_path`: path to downloaded model
-- `actor.tokenizer.tokenizer_model`: path to tokenizer
-
-
-**Run from the repository root.**
-
----
-
-## 4. CRL Experiment Scripts (examples/crl_experiment/)
-
-All scripts source `common_functions.sh` and use configs from `examples/embodiment/config/crl_experiment/`.
-
-### Training Scripts
-
-| Script | Description |
-|--------|-------------|
-| `run_embodiment_sequential.sh` | Sequential tasks (no merge between tasks) |
-| `run_embodiment_ewc.sh` | Sequential + EWC (Elastic Weight Consolidation) |
-| `run_embodiment_multitask.sh` | Joint multitask training (multiple tasks in one run) |
-| `run_embodiment_sequential_reorder.sh` | Sequential training with custom task order |
-| `run_embodiment_weight_merge.sh` | Weight merge: merge previous adapters, add new LoRA for each task |
-| `run_embodiment_slca.sh` | SLCA: learning-rate experiments (vision/llm/head LoRA LRs) |
-| `run_embodiment_simple_cnn.sh` | Simple CNN policy (non-VLA baseline) |
-| `run_embodiment_er.sh` | Sequential + ER (Experience Replay) |
-| `run_embodiment_der.sh` | Sequential + DER (Dark Experience Replay) |
-
-### Evaluation Scripts
-
-| Script | Description |
-|--------|-------------|
-| `eval_embodiment.sh` | Direct evaluation of a checkpoint |
-| `eval_embodiment_lora_scale.sh` | Evaluation with LoRA scaling (single or multi-LoRA) |
-
-### Usage Examples
-
-**Sequential (single task):**
-```bash
+# Train on task 0 of LIBERO-Spatial
 bash examples/crl_experiment/run_embodiment_sequential.sh 0
 ```
 
-**Sequential (task range 0–3):**
+Or train sequentially on tasks 0 through 4:
+
 ```bash
-bash examples/crl_experiment/run_embodiment_sequential.sh "0,3"
+bash examples/crl_experiment/run_embodiment_sequential.sh "0,4"
 ```
 
-**Sequential with custom max_epoch and seed:**
-```bash
-bash examples/crl_experiment/run_embodiment_sequential.sh 0 "" 15 "" 42
+---
+
+## CRL Experiment Scripts
+
+All scripts are in `examples/crl_experiment/` and source `common_functions.sh` for shared utilities.
+
+### Training
+
+| Script | Method | Example |
+|--------|--------|---------|
+| `run_embodiment_sequential.sh` | Sequential Fine-Tuning (Seq. FT) | `bash ... 0` or `bash ... "0,4"` |
+| `run_embodiment_ewc.sh` | EWC (Elastic Weight Consolidation) | `bash ... "0,4"` |
+| `run_embodiment_er.sh` | Experience Replay | `bash ... 0 0.03` |
+| `run_embodiment_der.sh` | Dark Experience Replay | `bash ... 0 0.03` |
+| `run_embodiment_weight_merge.sh` | Weight Merge | `bash ... "0,3" 0.8` |
+| `run_embodiment_slca.sh` | SLCA (learning-rate schedules) | `bash ... "1,4" "2e-6,2e-6,1e-5"` |
+| `run_embodiment_multitask.sh` | Multitask (joint training) | `bash ... "0,2,4"` |
+| `run_embodiment_simple_cnn.sh` | Simple CNN baseline | `bash ... 0` |
+| `run_embodiment_sequential_reorder.sh` | Seq. FT with custom task order | `bash ... "0,4"` |
+
+### Script Arguments
+
+Each script has its own argument pattern. Below are the signatures for each:
+
+**Sequential Fine-Tuning:**
+```
+bash run_embodiment_sequential.sh TASK_ID_OR_RANGE [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+# Example: bash ... "0,4"
+# Example: bash ... 0 "" 15 "" 42
 ```
 
-**Sequential with ER (ER coefficient 0.03):**
-```bash
-bash examples/crl_experiment/run_embodiment_er.sh 0 0.03
+**EWC:**
+```
+bash run_embodiment_ewc.sh TASK_ID_OR_RANGE [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+# Example: bash ... "0,4"
 ```
 
-**Sequential with DER (DER coefficient 0.03):**
-```bash
-bash examples/crl_experiment/run_embodiment_der.sh 0 0.03
+**Experience Replay:**
+```
+bash run_embodiment_er.sh TASK_ID_OR_RANGE [ER_COEFF=0.03] [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+# Example: bash ... "0,4" 0.03
 ```
 
-**Weight merge (merge coefficient 0.8):**
-```bash
-bash examples/crl_experiment/run_embodiment_weight_merge.sh "0,3" 0.8
+**Dark Experience Replay:**
+```
+bash run_embodiment_der.sh TASK_ID_OR_RANGE [DER_COEFF=0.03] [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+# Example: bash ... "0,4" 0.03
 ```
 
-**SLCA (learning-rate experiment, task range with custom LRs):**
-```bash
-bash examples/crl_experiment/run_embodiment_slca.sh "1,4" "2e-6,2e-6,1e-5"
+**Weight Merge:**
+```
+bash run_embodiment_weight_merge.sh TASK_ID_OR_RANGE MERGE_COEFF [CONFIG_NAME] [SEED]
+# Example: bash ... "0,4" 0.8
 ```
 
-**Multitask (joint training on tasks 0, 2, 4):**
-```bash
-bash examples/crl_experiment/run_embodiment_multitask.sh "0,2,4"
+**SLCA:**
+```
+bash run_embodiment_slca.sh TASK_ID_OR_RANGE LR_STRING [CONFIG_NAME] [SEED]
+# Example: bash ... "1,4" "2e-6,2e-6,1e-5"
 ```
 
-**Simple CNN (single task or range):**
-```bash
-bash examples/crl_experiment/run_embodiment_simple_cnn.sh 0
-bash examples/crl_experiment/run_embodiment_simple_cnn.sh "0,3"
+**Multitask:**
+```
+bash run_embodiment_multitask.sh TASK_IDS [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+# Example: bash ... "0,2,4"
 ```
 
-**Precomputing Logits to Disk:**
-```bash
-bash examples/embodiment/compute_base_logits_embodiment.sh
+**Sequential (custom order):**
+```
+bash run_embodiment_sequential_reorder.sh TASK_IDS RUN_ID [MAX_EPOCH] [CONFIG_NAME] [SEED] [INIT_CHECKPOINT]
+# Example: bash ... "4,3,2,1,0" reorder_v1
 ```
 
-**Evaluation:**
+**Simple CNN:**
+```
+bash run_embodiment_simple_cnn.sh TASK_ID_OR_RANGE [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
+# Example: bash ... 0
+```
+
+**LoRA Scale Evaluation:**
+```
+bash eval_embodiment_lora_scale.sh CHECKPOINT_LOCATION CURRENT_LORA_SCALE [PREVIOUS_LORA_COEFF] [STEP_NUMBER] [CONFIG_NAME]
+# Example: bash ... logs/sequential/task_0 0.5
+```
+
+Common defaults across scripts:
+- **SEED**: `1234`
+- **CONFIG_NAME**: `crl_experiment/libero_spatial_grpo_openvlaoft_spatial` (varies for Simple CNN)
+- **TASK_ID_OR_RANGE**: Single task (`0`) or comma-separated range (`"0,4"` trains tasks 0 through 4 sequentially)
+
+### Evaluation
+
 ```bash
-# Standard LoRA checkpoint (default step 10)
+# Evaluate a checkpoint (default: global_step_10)
 bash examples/crl_experiment/eval_embodiment.sh logs/sequential/task_0_seed1234
 
-# With specific step number
+# Evaluate at a specific step
 bash examples/crl_experiment/eval_embodiment.sh logs/sequential/task_0_seed1234 20
 
-# Simple CNN
+# Evaluate Simple CNN
 bash examples/crl_experiment/eval_embodiment.sh logs/simple_cnn/task_0_seed1234 10 crl_experiment/libero_spatial_grpo_simple_cnn_eval
 
-# LoRA scale evaluation (single LoRA)
-bash examples/crl_experiment/eval_embodiment_lora_scale.sh logs/bcrl_logit/0.3/task_0 0.5
+# LoRA scale evaluation
+bash examples/crl_experiment/eval_embodiment_lora_scale.sh logs/sequential/task_0 0.5
 ```
 
-### Config Names
-
-Default configs vary by script. Override with the 4th (or 3rd) positional argument, for example:
-
-- `crl_experiment/libero_spatial_grpo_openvlaoft_spatial` (sequential, weight_merge, EWC, etc.)
-- `crl_experiment/libero_spatial_grpo_simple_cnn` (simple CNN)
-- `crl_experiment/libero_10_grpo_openvlaoft_long` (10-task suite)
-- `crl_experiment/libero_object_grpo_openvlaoft_object` (object suite)
-
 ---
 
-## 5. Configuration Files & Key Parameters
+## Configuration
 
-TODO: LLM generated need to change
+Configs are YAML files in `examples/embodiment/config/`. For general RLinf configuration options (batch sizes, learning rates, FSDP settings, logging, etc.), see the [RLinf documentation](https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/user/yaml.html).
 
-**Config directory:** `examples/embodiment/config/`
+Below are the CRL-specific parameters used in this work.
 
-### ManiSkill3
-- OpenVLA + PPO: `maniskill_ppo_openvla.yaml`
-- OpenVLA-OFT + PPO: `maniskill_ppo_openvlaoft.yaml`
-- OpenVLA + GRPO: `maniskill_grpo_openvla.yaml`
-- OpenVLA-OFT + GRPO: `maniskill_grpo_openvlaoft.yaml`
+### CRL Method Parameters
 
-### LIBERO
-- OpenVLA-OFT + PPO: `libero_10_ppo_openvlaoft.yaml`
-- OpenVLA-OFT + GRPO: `libero_10_grpo_openvlaoft.yaml`
-
-### Key YAML fields
-- `actor.model.lora_path`: path to LoRA weights for finetuning
-- `runner.task_type`: `"embodied"`
-- `cluster.component_placement`: GPU allocation for actor, rollout, env
-- `rollout.model_dir`: path to HF model
-- `actor.checkpoint_load_path`: initial checkpoint
-- `actor.checkpoint_save_path`: where to save
-- `actor.tokenizer.tokenizer_model`: tokenizer path
-- `runner.logger.log_path`: log directory
-- `runner.max_epochs`, `runner.max_steps`: training duration
-- `actor.global_batch_size`, `actor.micro_batch_size`: batch sizes
-- `Other YAML fields`: https://rlinf.readthedocs.io/en/latest/rst_source/tutorials/user/yaml.html
-
----
-
-## 6. Algorithms (Embodied)
-
-### PPO (embodied only)
-
+**Experience Replay / Dark Experience Replay:**
 ```yaml
 algorithm:
-  require_values: True
-  normalize_advantages: True
-  group_size: 1
-  adv_type: embodied_gae
-  loss_type: embodied_ppo
-  loss_agg_func: "token-mean"
-  micro_batch_size: 20
-  global_batch_size: 80
-  clip_ratio_high: 0.2
-  clip_ratio_low: 0.2
-  value_clip: 0.2
-  gamma: 0.99
-  gae_lambda: 0.95
+  use_experience_replay: True  # enable replay buffer
+  bc_coeff: 0.03               # replay loss coefficient
+
+  # DER-specific (logit-based replay):
+  +algorithm.use_reference_logits_bc: True
+  +algorithm.use_cached_bc_logits: True
 ```
 
-### GRPO (embodied)
-
+**EWC (Elastic Weight Consolidation):**
 ```yaml
 algorithm:
-  adv_type: embodied_grpo
-  loss_type: embodied_grpo
-  loss_agg_func: "token-mean"
-  group_size: 8
-  normalize_advantages: True
+  +algorithm.use_ewc=True
+```
+
+**Weight Merge:**
+```yaml
+# Controlled via script argument (merge coefficient)
+# e.g., bash run_embodiment_weight_merge.sh "0,4" 0.8
+```
+
+**SLCA (per-module learning rates):**
+```yaml
+# Controlled via script argument (comma-separated LRs for vision, LLM, head)
+# e.g., bash run_embodiment_slca.sh "0,4" "2e-6,2e-6,1e-5"
+```
+
+### Task Configuration
+
+```yaml
+env:
+  fixed_task_ids: [0,1,2]              # which task(s) to train on (null indicates all)
 ```
 
 ---
 
-## 7. Environment Details
+## Evaluation
 
-### LIBERO
-- **Task:** household manipulation (pick-place, stacking, drawers, spatial)
-- **Observation:** RGB 224×224
-- **Action:** 7D continuous (x, y, z, roll, pitch, yaw, gripper)
-- **Suites:** Spatial, Goal, Object, Long
+Evaluation runs the trained policy across all tasks (train + held-out) and reports per-task success rates. Results are printed as a dictionary:
 
-### Data structure
-- Images: `[batch_size, 3, 224, 224]`
-- Actions: discrete tokens → normalized continuous
-- Rewards: step-level from task completion
+```python
+{
+    'eval/env_info/task_0_success': 1.0,       # success rate for task 0
+    'eval/env_info/task_0_success_total': 8.0,  # number of eval episodes
+    'eval/env_info/task_1_success': 0.75,
+    ...
+    'eval/env_info/success_once': 0.775,       # overall success (any point in episode)
+    'eval/env_info/success_at_end': 0.625,     # success at final timestep
+    'eval/env_info/return': 3.125,             # cumulative return
+    'eval/env_info/episode_len': 512.0,        # episode length
+}
+```
 
----
+Key metrics:
+- **`task_X_success`**: Success rate for task X across evaluation episodes.
+- **`success_once`**: Fraction of episodes where the task was completed at least once.
+- **`success_at_end`**: Fraction of episodes where the task was completed at the final timestep.
 
-## 8. Evaluation
-
-Scripts live in `examples/embodiment/`. Entry point: `eval_embodied_agent.py`
-
-### LIBERO evaluation
-- `CONFIG_NAME`: e.g. `libero_goal_grpo_openvlaoft.eval`
-- Set `LIBERO_REPO_PATH`, `rollout.model_dir`, `actor.checkpoint_load_path`
-- Set `actor.model.ckpt_path` for RL checkpoint
-- Env vars: `MUJOCO_GL=osmesa`, `PYOPENGL_PLATFORM=osmesa`
-
-### Metrics output
-- `eval/env_info/success_once` - success rate (at least once per episode)
-- `eval/env_info/return`
-- `eval/env_info/episode_len`
-- `eval/env_info/success_at_end`
-- `eval/env_info/task_*_success` - success rate for each task
+Results are logged to WandB and/or TensorBoard (configurable via `runner.logger.logger_backends`).
 
 ---
 
-## 9. Visualization & Monitoring
+## Precomputing Base Logits
 
-### TensorBoard
+For Dark Experience Replay (DER), base model logits can be precomputed and cached to disk to avoid recomputation during training.
 
+### Prerequisites
+
+Download the modified RLDS dataset into your LIBERO datasets directory:
 ```bash
-tensorboard --logdir ./logs --port 6006
+hf download openvla/modified_libero_rlds --repo-type dataset --local-dir ./LIBERO/libero/datasets/
 ```
 
-### Video logging
+This places the dataset at `./LIBERO/libero/datasets/libero_10_no_noops/`.
 
-```yaml
-video_cfg:
-  save_video: True
-  info_on_video: True
-  video_base_dir: ./logs/video/train
+### Running
+```bash
+bash examples/embodiment/compute_base_logits_embodiment.sh [CONFIG_NAME]
 ```
 
-### WandB
+This runs `compute_base_logits_embodied_agent.py`, which generates logits for each task's demonstration trajectories and saves them alongside the dataset. These cached logits are loaded automatically when `use_cached_bc_logits: True` is set in the config.
 
-```yaml
-runner:
-  task_type: embodied
-  logger:
-    log_path: "../results"
-    project_name: rlinf
-    experiment_name: "test_openvla"
-    logger_backends: ["wandb"] # tensorboard, wandb, swanlab
+---
+
+## Architecture & Code Structure
+
+### Training Flow
+
+1. **Initialization** — Cluster setup, create actor (FSDP), rollout worker, and environment workers from config
+2. **Rollout** — Environment interaction + action generation (pipelined across workers)
+3. **Advantage computation** — GAE (PPO) or group-relative advantages (GRPO)
+4. **Policy update** — LoRA parameter updates via the chosen algorithm
+5. **Repeat** — Sync weights to rollout worker, loop
+
+Entry point: `examples/embodiment/train_embodied_agent.py`
+
+### Key Directories
+
+```
+examples/
+  embodiment/
+    config/                                 # YAML configs
+      crl_experiment/                       # CRL-specific configs
+    train_embodied_agent.py                 # Training entry point
+    eval_embodied_agent.py                  # Evaluation entry point
+    compute_base_logits_embodied_agent.py   # Logit precomputation
+    run_embodiment.sh                       # Core training launcher
+    compute_base_logits_embodiment.sh       # Logit precomputation launcher
+  crl_experiment/
+    run_embodiment_sequential.sh            # Sequential fine-tuning
+    run_embodiment_ewc.sh                   # EWC
+    run_embodiment_er.sh                    # Experience Replay
+    run_embodiment_der.sh                   # Dark Experience Replay
+    run_embodiment_weight_merge.sh          # Weight Merge
+    run_embodiment_slca.sh                  # SLCA
+    run_embodiment_multitask.sh             # Multitask training
+    run_embodiment_simple_cnn.sh            # Simple CNN baseline
+    run_embodiment_sequential_reorder.sh    # Custom task order
+    eval_embodiment.sh                      # Checkpoint evaluation
+    eval_embodiment_lora_scale.sh           # LoRA scale evaluation
+    common_functions.sh                     # Shared utilities
+
+rlinf/custom/                               # Custom modules
+  libero_trajectory_dataset.py              # LIBERO dataset loader
+  logits_precompute_worker.py               # Logit caching worker
+  loss.py                                   # CRL loss functions (EWC, ER, DER)
+  random_action_rollout_worker.py           # Random baseline rollout
+  simple_cnn_utils.py                       # CNN policy utilities
 ```
 
 ---
 
-## 10. Programming Flow (Embodied)
+## Citation
 
-**Entry point:** `examples/embodiment/train_embodied_agent.py`
+If you use this codebase, please cite our paper:
 
-**High-level flow:**
-1. Cluster + HybridComponentPlacement from config
-2. Create actor (EmbodiedFSDPActor), rollout (MultiStepRolloutWorker), env (EnvWorker)
-3. `EmbodiedRunner.init_workers()` then `runner.run()`
+```bibtex
+@article{TODO,
+  title={Simple Recipe Works: Vision-Language-Action Models are Natural Continual Learners with Reinforcement Learning},
+  author={Hu, Jiaheng and Shim, Jay and Tang, Chen and Sung, Yoonchang and Liu, Bo and Stone, Peter and Martin-Martin, Roberto},
+  journal={arXiv preprint arXiv:2603.11653},
+  year={2026},
+  url={https://arxiv.org/abs/2603.11653}
+}
+```
 
-**Training loop:**
-- `update_rollout_weights()` - sync actor ↔ rollout
-- `generate_rollouts()` - env.interact + rollout.generate (pipelined)
-- `actor.compute_advantages_and_returns()`
-- `actor.run_training()`
+Since this codebase is built on RLinf, we recommend additionally citing:
+
+```bibtex
+@article{yu2025rlinf,
+  title={RLinf: Flexible and Efficient Large-scale Reinforcement Learning via Macro-to-Micro Flow Transformation},
+  author={Yu, Chao and Wang, Yuanqing and Guo, Zhen and Lin, Hao and Xu, Si and Zang, Hongzhi and Zhang, Quanlu and Wu, Yongji and Zhu, Chunyang and Hu, Junhao and Huang, Zixiao and Wei, Mingjie and Xie, Yuqing and Yang, Ke and Dai, Bo and Xu, Zhexuan and Wang, Xiangyuan and Fu, Xu and Liu, Zhihao and Chen, Kang and Liu, Weilin and Liu, Gang and Li, Boxun and Yang, Jianlei and Yang, Zhi and Dai, Guohao and Wang, Yu},
+  journal={arXiv preprint arXiv:2509.15965},
+  year={2025}
+}
+```
 
 ---
 
+## License
 
-## 11. Files & Directories
-
-```
-examples/embodiment/
-  config/                 - YAML configs (incl. crl_experiment/)
-  train_embodied_agent.py
-  run_embodiment.sh
-  eval_embodied_agent.py
-
-examples/crl_experiment/
-  run_embodiment_er.sh
-  run_embodiment_der.sh
-  run_embodiment_sequential.sh
-  run_embodiment_ewc.sh
-  run_embodiment_multitask.sh
-  run_embodiment_sequential_reorder.sh
-  run_embodiment_weight_merge.sh
-  run_embodiment_slca.sh
-  run_embodiment_simple_cnn.sh
-  eval_embodiment.sh
-  eval_embodiment_lora_scale.sh
-  common_functions.sh
-
-rlinf/custom/
-  libero_trajectory_dataset.py
-  logits_precompute_worker.py
-  loss.py
-  random_action_rollout_worker.py
-  rlds_logits_precompute_worker.py
-  simple_cnn_utils.py
-```
-
-
-**Acknowledgements**
-If you used this codebase, please cite
-```bibtex
-@misc{TODO}, 
-}
-```
-
-Since our codebase is built upon RLinf, we recommend additionally citing:
-```bibtex
-@misc{yu2025rlinfflexibleefficientlargescale,
-  title={RLinf: Flexible and Efficient Large-scale Reinforcement Learning via Macro-to-Micro Flow Transformation}, 
-  author={Chao Yu and Yuanqing Wang and Zhen Guo and Hao Lin and Si Xu and Hongzhi Zang and Quanlu Zhang and Yongji Wu and Chunyang Zhu and Junhao Hu and Zixiao Huang and Mingjie Wei and Yuqing Xie and Ke Yang and Bo Dai and Zhexuan Xu and Xiangyuan Wang and Xu Fu and Zhihao Liu and Kang Chen and Weilin Liu and Gang Liu and Boxun Li and Jianlei Yang and Zhi Yang and Guohao Dai and Yu Wang},
-  year={2025},
-  eprint={2509.15965},
-  archivePrefix={arXiv},
-  primaryClass={cs.LG},
-  url={https://arxiv.org/abs/2509.15965}, 
-}
-```
-
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
