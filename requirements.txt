@@ -11,7 +11,7 @@ einops>=0.8.0
 diffusers>=0.30.0
 
 gymnasium>=0.29.0
-robosuite>=1.4.1
+robosuite==1.4.1
 mujoco>=3.3.0
 sapien>=3.0.0
 
@@ -34,5 +34,10 @@ imageio-ffmpeg>=0.6.0
 opencv-python>=4.11.0
 matplotlib>=3.10.0
 tqdm>=4.67.0
-ray>=2.49.0
+ray==2.49.0
 PyYAML>=6.0.0
+
+easydict
+bddl
+tensorflow
+tensorflow-graphics

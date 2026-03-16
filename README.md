@@ -72,9 +72,6 @@ pip install -r requirements.txt
 cd transformers-openvla-oft && pip install -e . && cd ..
 cd openvla-oft && pip install -e . && cd ..
 cd LIBERO && pip install -e . && cd ..
-
-# 5. Install gymnasium
-pip install gymnasium
 ```
 > **Optional:** For Flash Attention support (recommended for speed), install separately:
 > ```bash
