@@ -227,7 +227,8 @@ class CollectiveGroup:
         """
         self._init_p2p_process_group()
         # First send object type to the destination worker
-        object_type_tensor = torch.tensor(object_type, dtype=torch.int, device="cpu")
+        # Keep metadata shape consistent with recv-side allocation (shape [1]).
+        object_type_tensor = torch.tensor([object_type], dtype=torch.int, device="cpu")
         self._send(object_type_tensor, CollectiveGroup.CPU, comm_id)
         self._logger.debug(
             f"Sending object type {object_type} from {self._cur_worker_address.get_name()} in group {self._group_info.group_name}"

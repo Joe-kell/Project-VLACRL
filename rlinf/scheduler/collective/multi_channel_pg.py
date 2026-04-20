@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 from datetime import timedelta
 from typing import List, Optional
 
@@ -125,6 +126,15 @@ class MultiChannelProcessGroup:
             )
 
         if not self._no_accel_ccl:
+            # Optional: bind the base NCCL process group to the current CUDA device.
+            # This can enable split optimizations but may increase memory usage.
+            bind_device_id = None
+            if (
+                self._accel_ccl_backend == "nccl"
+                and os.environ.get("RLINF_BIND_PG_DEVICE_ID", "0") == "1"
+            ):
+                bind_device_id = torch.device(f"cuda:{torch.cuda.current_device()}")
+
             base_group = MultiChannelProcessGroup._create_process_group(
                 backend=self._accel_ccl_backend,  # Only NCCL group supports splitting
                 init_method=init_method,
@@ -132,12 +142,12 @@ class MultiChannelProcessGroup:
                 rank=rank,
                 group_name=group_name + f"{self._accel_ccl_backend}_send_0",
                 timeout=timeout,
-                # device_id=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                # Setting device_id is crucial triggers eager creation of NCCL communicators
+                device_id=bind_device_id,
+                # Setting device_id can trigger eager creation of NCCL communicators
                 # https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group
                 # If not, communicators will only be created upon the first collective operation
                 # If the first pair of communications are from different process groups (e.g., two async recvs from a group), the NCCL group creation will hang by then
-                # However, eager creation of NCCL communicators leads to severe GPU memory consumption. So we disable it by default.
+                # However, eager creation of NCCL communicators can lead to severe GPU memory consumption. So we keep this opt-in.
             )
 
             for i in range(self._num_channels):
@@ -313,6 +323,7 @@ class MultiChannelProcessGroup:
             pg_name = dist._get_process_group_name(group)
             msg = f"Broadcast failed on ProcessGroup {pg_name} rank {self._cur_rank} with error: {error}. Args - tensor: {tensor}, src: {src}, group: {group}, async_op: {async_op}."
             self._logger.error(msg)
+            raise RuntimeError(msg) from error
 
     @staticmethod
     def _create_process_group(
@@ -432,7 +443,7 @@ class MultiChannelProcessGroup:
         if group_name is None:
             group_name = _process_group_name(ranks, use_hashed_name=False)
 
-        pg, _ = MultiChannelProcessGroup._new_process_group_helper(
+        result = MultiChannelProcessGroup._new_process_group_helper(
             base_group,
             group_world_size,
             group_rank,
@@ -444,6 +455,20 @@ class MultiChannelProcessGroup:
             timeout=timeout,
             device_id=device_id,
         )
+        if result is None:
+            raise RuntimeError(
+                "Process group split failed (backend does not support splitting). "
+                f"backend={backend}, group_name={group_name}, "
+                f"world_size={group_world_size}, rank={group_rank}, "
+                f"bound_device_id={getattr(base_group, 'bound_device_id', None)}"
+            )
+        pg, _ = result
+        if pg is None:
+            raise RuntimeError(
+                "Process group split failed (backend does not support splitting). "
+                "This indicates NCCL split is unsupported in the current runtime. "
+                "Use a backend that supports splitting or avoid split-based groups."
+            )
 
         # Create the global rank to group rank mapping
         _world.pg_group_ranks[pg] = {
@@ -562,12 +587,13 @@ class MultiChannelProcessGroup:
                 pass
 
             if not split_from or not split_from.supports_splitting:
-                return None
-
-            # If necessary, find a backend to split from by peeling process
-            # group wrappers from our potentially wrapped process group.
-            while _GLOO_AVAILABLE and isinstance(split_from, _ProcessGroupWrapper):
-                split_from = split_from.wrapped_pg
+                # Fall back to creating a fresh process group when split is unsupported.
+                split_from = None
+            else:
+                # If necessary, find a backend to split from by peeling process
+                # group wrappers from our potentially wrapped process group.
+                while _GLOO_AVAILABLE and isinstance(split_from, _ProcessGroupWrapper):
+                    split_from = split_from.wrapped_pg
         else:
             split_from = None
 

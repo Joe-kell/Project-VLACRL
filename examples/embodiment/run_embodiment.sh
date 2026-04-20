@@ -7,6 +7,7 @@
 #
 # Note: REPO_PATH is automatically set to the parent directory of examples/
 #       If you need to override it, set it before running this script.
+set -e -o pipefail
 
 export EMBODIED_PATH="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export REPO_PATH=$(dirname $(dirname "$EMBODIED_PATH"))
