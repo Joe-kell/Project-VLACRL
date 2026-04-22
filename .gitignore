@@ -35,3 +35,6 @@ model/
 src/libero/
 src/openvla-oft/
 third_party/libero_plus/liberoplus.egg-info/
+third_party/libero_plus/liberoplus/liberoplus/assets.zip
+third_party/libero_plus/liberoplus/liberoplus/assets/
+third_party/libero_plus/liberoplus/liberoplus/inspire/
