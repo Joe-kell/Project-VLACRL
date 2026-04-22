@@ -31,3 +31,7 @@ RLinf-Pi0*
 model/
 hf_model_cache/
 model/
+
+src/libero/
+src/openvla-oft/
+third_party/libero_plus/liberoplus.egg-info/
