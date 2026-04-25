@@ -20,7 +20,6 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 # import gym
 import gymnasium as gym
 import numpy as np
-from libero.libero.envs import OffScreenRenderEnv
 from libero.libero.envs.venv import (
     BaseVectorEnv,
     CloudpickleWrapper,
@@ -30,6 +29,10 @@ from libero.libero.envs.venv import (
     SubprocVectorEnv,
     _setup_buf,
 )
+from rlinf.envs.libero.utils import get_libero_type, import_offscreen_render_env
+
+LIBERO_TYPE = get_libero_type()
+OffScreenRenderEnv = import_offscreen_render_env(LIBERO_TYPE)
 
 gym_old_venv_step_type = Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 gym_new_venv_step_type = Tuple[

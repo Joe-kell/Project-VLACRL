@@ -35,15 +35,15 @@ set -euo pipefail
 #   BASE_GROUP_SIZE        (default: 8; CRL baseline)
 #   BASE_NUM_GROUP_ENVS    (default: 8; CRL baseline)
 #   BASE_ROLLOUT_EPOCH     (default: 16; CRL baseline)
-#   ACTOR_GPU_MAP    (default: 0 when LIGHTWEIGHT_SMOKE=1, else 0-1)
-#   ROLLOUT_GPU_MAP  (default: 1 when LIGHTWEIGHT_SMOKE=1, else 2)
-#   ENV_GPU_MAP      (default: 2 when LIGHTWEIGHT_SMOKE=1, else 3)
+#   ACTOR_GPU_MAP    (default: 0-1 when LIGHTWEIGHT_SMOKE=1, else 0-1)
+#   ROLLOUT_GPU_MAP  (default: 2 when LIGHTWEIGHT_SMOKE=1, else 2)
+#   ENV_GPU_MAP      (default: 3 when LIGHTWEIGHT_SMOKE=1, else 3)
 #   SMOKE_GROUP_SIZE (default: 2)
 #   SMOKE_NUM_GROUP_ENVS      (default: 2)
-#   SMOKE_MICRO_BATCH_SIZE    (default: 8)
-#   SMOKE_GLOBAL_BATCH_SIZE   (default: 32)
-#   SMOKE_ROLLOUT_EPOCH       (default: 2)
-#   SMOKE_EVAL_ROLLOUT_EPOCH  (default: 2)
+#   SMOKE_MICRO_BATCH_SIZE    (default: 1 when LIGHTWEIGHT_SMOKE=1, else 8)
+#   SMOKE_GLOBAL_BATCH_SIZE   (default: 2 when LIGHTWEIGHT_SMOKE=1, else 32)
+#   SMOKE_ROLLOUT_EPOCH       (default: 1 when LIGHTWEIGHT_SMOKE=1, else 2)
+#   SMOKE_EVAL_ROLLOUT_EPOCH  (default: 1 when LIGHTWEIGHT_SMOKE=1, else 2)
 #   SMOKE_SAVE_INTERVAL       (default: 1)
 #   LIGHTWEIGHT_SMOKE (default: 1; force a very light smoke run that collects
 #                      minimal rollout data and executes at least one train step)
@@ -130,13 +130,14 @@ BASE_GROUP_SIZE="${BASE_GROUP_SIZE:-8}"
 BASE_NUM_GROUP_ENVS="${BASE_NUM_GROUP_ENVS:-8}"
 BASE_ROLLOUT_EPOCH="${BASE_ROLLOUT_EPOCH:-16}"
 if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
-  ACTOR_GPU_MAP="${ACTOR_GPU_MAP:-0}"
-  ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-1}"
-  ENV_GPU_MAP="${ENV_GPU_MAP:-2}"
-  SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-1}"
-  SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-1}"
+  ACTOR_GPU_MAP="${ACTOR_GPU_MAP:-0-1}"
+  ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-2}"
+  ENV_GPU_MAP="${ENV_GPU_MAP:-3}"
+  # Keep lightweight defaults valid for GRPO (group_size must be > 1).
+  SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-2}"
+  SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-2}"
   SMOKE_MICRO_BATCH_SIZE="${SMOKE_MICRO_BATCH_SIZE:-1}"
-  SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-1}"
+  SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-2}"
   SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-1}"
   SMOKE_EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-1}"
   SMOKE_SAVE_INTERVAL="${SMOKE_SAVE_INTERVAL:-1}"
@@ -151,6 +152,66 @@ else
   SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-2}"
   SMOKE_EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-2}"
   SMOKE_SAVE_INTERVAL="${SMOKE_SAVE_INTERVAL:-1}"
+fi
+
+count_gpu_slots() {
+  local map="$1"
+  local count=0
+  local token
+  local start
+  local end
+  local tmp
+
+  IFS=',' read -r -a tokens <<< "$map"
+  for token in "${tokens[@]}"; do
+    token="${token//[[:space:]]/}"
+    [[ -z "$token" ]] && continue
+    if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      start="${BASH_REMATCH[1]}"
+      end="${BASH_REMATCH[2]}"
+      if (( end < start )); then
+        tmp="$start"
+        start="$end"
+        end="$tmp"
+      fi
+      count=$((count + end - start + 1))
+    elif [[ "$token" =~ ^[0-9]+$ ]]; then
+      count=$((count + 1))
+    else
+      echo "ERROR: invalid GPU map token '$token' in map '$map'"
+      exit 1
+    fi
+  done
+  echo "$count"
+}
+
+if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+  if ! [[ "$SMOKE_MICRO_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( SMOKE_MICRO_BATCH_SIZE < 1 )); then
+    echo "ERROR: SMOKE_MICRO_BATCH_SIZE must be a positive integer, got: $SMOKE_MICRO_BATCH_SIZE"
+    exit 1
+  fi
+  if ! [[ "$SMOKE_GLOBAL_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( SMOKE_GLOBAL_BATCH_SIZE < 1 )); then
+    echo "ERROR: SMOKE_GLOBAL_BATCH_SIZE must be a positive integer, got: $SMOKE_GLOBAL_BATCH_SIZE"
+    exit 1
+  fi
+
+  ACTOR_WORLD_SIZE="$(count_gpu_slots "$ACTOR_GPU_MAP")"
+  if (( ACTOR_WORLD_SIZE < 2 )); then
+    echo "ERROR: LIGHTWEIGHT_SMOKE requires multi-actor placement to avoid single-actor flattening issues."
+    echo "       Got ACTOR_GPU_MAP='$ACTOR_GPU_MAP' (world_size=$ACTOR_WORLD_SIZE)."
+    echo "       Use at least two actor GPUs, e.g. ACTOR_GPU_MAP=0-1."
+    exit 1
+  fi
+
+  if (( SMOKE_GLOBAL_BATCH_SIZE % (SMOKE_MICRO_BATCH_SIZE * ACTOR_WORLD_SIZE) != 0 )); then
+    echo "ERROR: Invalid smoke batch arithmetic:"
+    echo "       SMOKE_GLOBAL_BATCH_SIZE=$SMOKE_GLOBAL_BATCH_SIZE"
+    echo "       SMOKE_MICRO_BATCH_SIZE=$SMOKE_MICRO_BATCH_SIZE"
+    echo "       actor_world_size=$ACTOR_WORLD_SIZE"
+    echo "       Requirement: global % (micro * actor_world_size) == 0"
+    echo "       Example valid values: SMOKE_GLOBAL_BATCH_SIZE=2 SMOKE_MICRO_BATCH_SIZE=1 with ACTOR_GPU_MAP=0-1."
+    exit 1
+  fi
 fi
 
 if [[ "$CONFIG_NAME" == *openvlaoft* ]]; then
@@ -305,6 +366,32 @@ if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   exit 1
 fi
 
+if [[ "$LIBERO_TYPE" == "plus" ]]; then
+  python - <<'PY'
+import importlib
+import sys
+
+missing = []
+for module_name in ("liberoplus.liberoplus", "gym"):
+    try:
+        importlib.import_module(module_name)
+    except Exception as exc:
+        missing.append((module_name, str(exc)))
+
+if missing:
+    print("ERROR: LIBERO_TYPE=plus dependency preflight failed:")
+    for module_name, reason in missing:
+        print(f"  - {module_name}: {reason}")
+    print("Install/repair with:")
+    print("  python -m pip install -r third_party/libero_plus/requirements.txt")
+    print("  python -m pip install -r third_party/libero_plus/extra_requirements.txt")
+    print("  python -m pip install -e third_party/libero_plus")
+    sys.exit(1)
+
+print("LIBERO+ dependency preflight OK (liberoplus + gym).")
+PY
+fi
+
 CMD=(
   bash examples/embodiment/run_embodiment.sh "$CONFIG_NAME"
   "env.fixed_task_ids=[$TASK_ID]"
@@ -337,10 +424,11 @@ if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
     "runner.save_interval=1"
     "algorithm.rollout_epoch=1"
     "algorithm.eval_rollout_epoch=1"
-    "algorithm.group_size=1"
-    "algorithm.num_group_envs=1"
-    "actor.global_batch_size=1"
-    "actor.micro_batch_size=1"
+    # GRPO validation requires group_size > 1.
+    "algorithm.group_size=$SMOKE_GROUP_SIZE"
+    "algorithm.num_group_envs=$SMOKE_NUM_GROUP_ENVS"
+    "actor.global_batch_size=$SMOKE_GLOBAL_BATCH_SIZE"
+    "actor.micro_batch_size=$SMOKE_MICRO_BATCH_SIZE"
     "env.train.max_episode_steps=8"
     "env.eval.max_episode_steps=8"
     "env.eval.num_envs=1"
@@ -358,7 +446,7 @@ echo
 
 GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 GIT_STATUS="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
-REPRO_FILE_BASE="$REPRO_BASE_DIR/$RUN_NAME"
+REPRO_SUMMARY_FILE="${REPRO_SUMMARY_FILE:-$REPRO_BASE_DIR/$RUN_NAME/repro_summary.txt}"
 {
   echo "run_name=$RUN_NAME"
   echo "vla_type=$VLA_TYPE"
@@ -384,8 +472,8 @@ REPRO_FILE_BASE="$REPRO_BASE_DIR/$RUN_NAME"
     printf '%s\n' "$GIT_STATUS"
   fi
   echo "git_status_porcelain_end"
-} > "$REPRO_FILE_BASE"
+} > "$REPRO_SUMMARY_FILE"
 
 echo
 echo "Smoke test completed successfully."
-echo "Repro summary file: $REPRO_FILE_BASE"
+echo "Repro summary file: $REPRO_SUMMARY_FILE"

@@ -4,6 +4,8 @@
 #
 # Environment Variables (optional overrides):
 #   - LIBERO_REPO_PATH: Path to LIBERO repository (defaults to ${REPO_PATH}/LIBERO)
+#   - LIBERO_TYPE: `standard` (default) or `plus`
+#   - LIBERO_SUFFIX: optional perturbation selector for LIBERO-plus
 #
 # Note: REPO_PATH is automatically set to the parent directory of examples/
 #       If you need to override it, set it before running this script.
@@ -19,8 +21,33 @@ export PYTHONPATH=${REPO_PATH}:$PYTHONPATH
 # NOTE: set LIBERO_REPO_PATH to the path of the LIBERO repo
 # Defaults to ${REPO_PATH}/LIBERO if not set
 export LIBERO_REPO_PATH="${LIBERO_REPO_PATH:-${REPO_PATH}/LIBERO}"
-# NOTE: set LIBERO_CONFIG_PATH for libero/libero/__init__.py
-export LIBERO_CONFIG_PATH=${LIBERO_REPO_PATH}
+export LIBERO_TYPE="${LIBERO_TYPE:-standard}"
+export LIBERO_SUFFIX="${LIBERO_SUFFIX:-}"
+if [ "${LIBERO_TYPE}" = "plus" ]; then
+    export LIBERO_PLUS_PATH="${LIBERO_PLUS_PATH:-${REPO_PATH}/third_party/libero_plus}"
+    # LIBERO-plus reuses LIBERO_CONFIG_PATH env var for its own config root.
+    # Keep it separate from standard LIBERO to avoid reading wrong asset paths.
+    export LIBERO_CONFIG_PATH="${LIBERO_PLUS_CONFIG_PATH:-$HOME/.liberoplus}"
+    python - <<'PY'
+import pathlib
+import liberoplus.liberoplus as l_plus
+
+asset_root = pathlib.Path(l_plus.get_libero_path("assets"))
+if not asset_root.is_dir():
+    raise RuntimeError(
+        f"LIBERO_TYPE=plus but assets directory is missing: {asset_root}"
+    )
+for required in ("scenes", "new_objects", "textures"):
+    if not (asset_root / required).is_dir():
+        raise RuntimeError(
+            f"LIBERO_TYPE=plus assets incomplete: missing '{required}' in {asset_root}"
+        )
+print(f"[run_embodiment] LIBERO+ assets OK: {asset_root}")
+PY
+else
+    # Standard LIBERO config root.
+    export LIBERO_CONFIG_PATH="${LIBERO_REPO_PATH}"
+fi
 
 export PYTHONPATH=${LIBERO_REPO_PATH}:$PYTHONPATH
 export CUDA_LAUNCH_BLOCKING=1
@@ -64,11 +91,20 @@ fi
 # Build log directory path with config tag if present
 # If LOG_DIR is already set (e.g., by crl_experiment scripts), use it as-is
 # Otherwise, create default path with config tag if present
+LIBERO_VARIANT_LOG_SUFFIX=""
+if [ "${LIBERO_TYPE}" != "standard" ]; then
+    LIBERO_VARIANT_LOG_SUFFIX="_${LIBERO_TYPE}"
+    if [ -n "${LIBERO_SUFFIX}" ]; then
+        SAFE_LIBERO_SUFFIX=$(echo "${LIBERO_SUFFIX}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/_/g')
+        LIBERO_VARIANT_LOG_SUFFIX="${LIBERO_VARIANT_LOG_SUFFIX}_${SAFE_LIBERO_SUFFIX}"
+    fi
+fi
+
 if [ -z "${LOG_DIR}" ]; then
     if [ -n "${CONFIG_TAG}" ]; then
-        LOG_DIR="${REPO_PATH}/logs_${CONFIG_TAG}/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
+        LOG_DIR="${REPO_PATH}/logs_${CONFIG_TAG}${LIBERO_VARIANT_LOG_SUFFIX}/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
     else
-        LOG_DIR="${REPO_PATH}/logs/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
+        LOG_DIR="${REPO_PATH}/logs${LIBERO_VARIANT_LOG_SUFFIX}/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
     fi
 fi
 MEGA_LOG_FILE="${LOG_DIR}/run_embodiment.log"
