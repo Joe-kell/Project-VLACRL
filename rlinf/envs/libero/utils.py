@@ -14,16 +14,194 @@
 
 """Utils for evaluating policies in LIBERO simulation environments."""
 
+import importlib
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import imageio
 import numpy as np
 import torch
-from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
 from PIL import Image, ImageDraw, ImageFont
+
+
+SUPPORTED_LIBERO_TYPES = {"standard", "pro", "plus"}
+
+
+def get_libero_type() -> str:
+    """Returns the active LIBERO variant from env var `LIBERO_TYPE`."""
+    libero_type = os.environ.get("LIBERO_TYPE", "standard").strip().lower()
+    if libero_type in {"", "libero", "default"}:
+        libero_type = "standard"
+    if libero_type not in SUPPORTED_LIBERO_TYPES:
+        raise ValueError(
+            f"Unsupported LIBERO_TYPE={libero_type!r}. "
+            f"Expected one of: {sorted(SUPPORTED_LIBERO_TYPES)}"
+        )
+    return libero_type
+
+
+@lru_cache(maxsize=3)
+def _resolve_libero_modules(libero_type: str):
+    """
+    Returns (core_module, benchmark_module, env_module) for the selected LIBERO variant.
+    """
+    if libero_type == "standard":
+        try:
+            core_module = importlib.import_module("libero.libero")
+            benchmark_module = importlib.import_module("libero.libero.benchmark")
+            env_module = importlib.import_module("libero.libero.envs")
+        except ImportError as exc:
+            raise ImportError(
+                "Failed to import standard LIBERO package. "
+                "Install it with `pip install -e LIBERO`."
+            ) from exc
+        return core_module, benchmark_module, env_module
+
+    if libero_type == "pro":
+        try:
+            core_module = importlib.import_module("liberopro.liberopro")
+            benchmark_module = importlib.import_module("liberopro.liberopro.benchmark")
+            env_module = importlib.import_module("liberopro.liberopro.envs")
+        except ImportError as exc:
+            raise ImportError(
+                "LIBERO_TYPE=pro requested, but `liberopro` is not installed."
+            ) from exc
+        return core_module, benchmark_module, env_module
+
+    if libero_type == "plus":
+        try:
+            core_module = importlib.import_module("liberoplus.liberoplus")
+            benchmark_module = importlib.import_module(
+                "liberoplus.liberoplus.benchmark"
+            )
+            env_module = importlib.import_module("liberoplus.liberoplus.envs")
+        except ImportError as exc:
+            raise ImportError(
+                "LIBERO_TYPE=plus import failed. This can mean either "
+                "`liberoplus` is not installed, or one of its transitive "
+                f"dependencies is missing (original error: {exc!r}). "
+                "Run: `pip install -r third_party/libero_plus/requirements.txt`, "
+                "`pip install -r third_party/libero_plus/extra_requirements.txt`, "
+                "and `pip install -e third_party/libero_plus`."
+            ) from exc
+        return core_module, benchmark_module, env_module
+
+    raise AssertionError(f"Unhandled libero_type={libero_type!r}")
+
+
+def get_libero_core_module(libero_type: Optional[str] = None):
+    if libero_type is None:
+        libero_type = get_libero_type()
+    core_module, _benchmark_module, _env_module = _resolve_libero_modules(libero_type)
+    return core_module
+
+
+def import_offscreen_render_env(
+    libero_type: Optional[str] = None,
+) -> Type[Any]:
+    if libero_type is None:
+        libero_type = get_libero_type()
+    _core_module, _benchmark_module, env_module = _resolve_libero_modules(libero_type)
+    return env_module.OffScreenRenderEnv
+
+
+def import_trajectory_logger_wrapper(
+    libero_type: Optional[str] = None,
+) -> Type[Any]:
+    if libero_type is None:
+        libero_type = get_libero_type()
+    if libero_type == "standard":
+        module_path = "libero.libero.envs.custom.trajectory_logger"
+    elif libero_type == "pro":
+        module_path = "liberopro.liberopro.envs.custom.trajectory_logger"
+    elif libero_type == "plus":
+        module_path = "liberoplus.liberoplus.envs.custom.trajectory_logger"
+    else:
+        raise AssertionError(f"Unhandled libero_type={libero_type!r}")
+
+    try:
+        module = importlib.import_module(module_path)
+        return module.TrajectoryLoggerWrapper
+    except ImportError as exc:
+        raise ImportError(
+            f"`log_trajectories=True` requires `{module_path}`, "
+            f"but it could not be imported for LIBERO_TYPE={libero_type!r}."
+        ) from exc
+
+
+def ensure_libero_plus_assets() -> str:
+    """
+    Verifies LIBERO-plus assets exist in installed package layout and returns asset root.
+    """
+    if get_libero_type() != "plus":
+        return ""
+
+    core_module = get_libero_core_module("plus")
+    asset_root = core_module.get_libero_path("assets")
+    if not os.path.isdir(asset_root):
+        raise RuntimeError(
+            "LIBERO_TYPE=plus requires assets, but asset directory was not found at "
+            f"{asset_root}. Download/extract assets.zip into the installed "
+            "`liberoplus.liberoplus` package directory."
+        )
+
+    required_subdirs = [
+        "scenes",
+        "new_objects",
+        "textures",
+    ]
+    missing_subdirs = [
+        subdir
+        for subdir in required_subdirs
+        if not os.path.isdir(os.path.join(asset_root, subdir))
+    ]
+    if missing_subdirs:
+        raise RuntimeError(
+            "LIBERO_TYPE=plus assets are incomplete. "
+            f"Missing directories under {asset_root}: {missing_subdirs}"
+        )
+    return asset_root
+
+
+def get_benchmark_overridden(benchmark_name):
+    """
+    Return the Benchmark class for a given name and active LIBERO variant.
+    For `libero_130`, dynamically aggregate all suites when mapping is absent.
+    """
+    libero_type = get_libero_type()
+    _core_module, benchmark_module, _env_module = _resolve_libero_modules(libero_type)
+
+    name = str(benchmark_name).lower()
+    if name != "libero_130":
+        return benchmark_module.get_benchmark(benchmark_name)
+
+    existing = benchmark_module.BENCHMARK_MAPPING.get("libero_130", None)
+    if existing is not None:
+        return existing
+
+    aggregated_task_map = {}
+    for suite_name in getattr(benchmark_module, "libero_suites", []):
+        suite_map = benchmark_module.task_maps.get(suite_name, {})
+        for task_name, task in suite_map.items():
+            if task_name not in aggregated_task_map:
+                aggregated_task_map[task_name] = task
+
+    BenchmarkBase = benchmark_module.Benchmark
+
+    class LIBERO_ALL(BenchmarkBase):
+        def __init__(self, task_order_index=0):
+            super().__init__(task_order_index=task_order_index)
+            self.name = "libero_130"
+            self._make_benchmark()
+
+        def _make_benchmark(self):
+            self.tasks = list(aggregated_task_map.values())
+            self.n_tasks = len(self.tasks)
+
+    benchmark_module.BENCHMARK_MAPPING["libero_130"] = LIBERO_ALL
+    return LIBERO_ALL
 
 
 def to_tensor(
@@ -219,7 +397,7 @@ def list_of_dict_to_dict_of_list(
 
 def get_libero_env(
     task: Any, model_family: str, seed: int = 0, resolution: int = 256
-) -> Tuple[OffScreenRenderEnv, str]:
+) -> Tuple[Any, str]:
     """
     Initializes and returns the LIBERO environment, along with the task description.
 
@@ -232,16 +410,23 @@ def get_libero_env(
     Returns:
         Tuple of (environment, task_description)
     """
+    libero_type = get_libero_type()
+    if libero_type == "plus":
+        ensure_libero_plus_assets()
+
+    libero_core = get_libero_core_module(libero_type)
+    offscreen_render_env = import_offscreen_render_env(libero_type)
+
     task_description = task.language
     task_bddl_file = os.path.join(
-        get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
+        libero_core.get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
     )
     env_args = {
         "bddl_file_name": task_bddl_file,
         "camera_heights": resolution,
         "camera_widths": resolution,
     }
-    env = OffScreenRenderEnv(**env_args)
+    env = offscreen_render_env(**env_args)
     env.seed(
         seed
     )  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
@@ -307,7 +492,8 @@ def get_libero_image(obs: Dict[str, np.ndarray]) -> np.ndarray:
 
 
 def get_libero_wrist_image(
-    obs: Dict[str, np.ndarray], resize_size: Union[int, Tuple[int, int]]
+    obs: Dict[str, np.ndarray],
+    resize_size: Union[int, Tuple[int, int]] = 224,
 ) -> np.ndarray:
     """
     Extracts wrist camera image from observations and preprocesses it.

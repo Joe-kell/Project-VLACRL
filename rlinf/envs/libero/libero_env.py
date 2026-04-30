@@ -13,21 +13,26 @@
 # limitations under the License.
 
 import copy
+import glob
 import os
+import re
 from typing import List, Optional, Union
 
 # import gym
 import gymnasium as gym
 import numpy as np
 import torch
-from libero.libero import get_libero_path
-from libero.libero.benchmark import Benchmark, get_benchmark
-from libero.libero.envs import OffScreenRenderEnv
 from omegaconf.omegaconf import OmegaConf
 
 from rlinf.envs.libero.utils import (
+    ensure_libero_plus_assets,
+    get_benchmark_overridden,
+    get_libero_core_module,
     get_libero_image,
+    get_libero_type,
     get_libero_wrist_image,
+    import_offscreen_render_env,
+    import_trajectory_logger_wrapper,
     list_of_dict_to_dict_of_list,
     put_info_on_image,
     quat2axisangle,
@@ -37,12 +42,53 @@ from rlinf.envs.libero.utils import (
 )
 from rlinf.envs.libero.venv import ReconfigureSubprocEnv
 
+PLUS_PERTURBATION_KEYS = [
+    "language",
+    "light",
+    "table",
+    "tb",
+    "add",
+    "level",
+    "sample",
+    "copy",
+]
+
 
 class LiberoEnv(gym.Env):
     def __init__(self, cfg, rank, world_size):
         self.rank = rank
         self.cfg = cfg
         self.world_size = world_size
+        self.libero_type = get_libero_type()
+        if self.libero_type == "plus":
+            ensure_libero_plus_assets()
+        self.libero_core = get_libero_core_module(self.libero_type)
+        self.offscreen_render_env_cls = import_offscreen_render_env(self.libero_type)
+        self.plus_suffix = self._get_plus_suffix()
+
+        if self.libero_type == "plus":
+            asset_root = self.libero_core.get_libero_path("assets")
+            os.environ["LIBERO_ASSET_ROOT"] = asset_root
+            os.environ["LIBERO_BDDL_PATH"] = self.libero_core.get_libero_path(
+                "bddl_files"
+            )
+            # LIBERO-plus config keys differ across releases (`init_files` vs `init_states`).
+            # Keep compatibility with both to avoid brittle environment setup failures.
+            init_states_path = None
+            for init_key in ("init_files", "init_states"):
+                try:
+                    init_states_path = self.libero_core.get_libero_path(init_key)
+                    break
+                except Exception:
+                    continue
+
+            if init_states_path is None:
+                raise RuntimeError(
+                    "LIBERO_TYPE=plus requires an init-state path in LIBERO-plus config. "
+                    "Expected one of keys: `init_files` or `init_states`."
+                )
+            os.environ["LIBERO_INIT_STATES_PATH"] = init_states_path
+
         self.seed = self.cfg.seed + rank
         self._is_start = True
         self.num_envs = self.cfg.num_envs
@@ -59,7 +105,7 @@ class LiberoEnv(gym.Env):
         self._generator_ordered = np.random.default_rng(seed=0)
         self.start_idx = 0
 
-        self.task_suite: Benchmark = get_benchmark(cfg.task_suite_name)()
+        self.task_suite = get_benchmark_overridden(cfg.task_suite_name)()
 
         self._compute_total_num_group_envs()
         self.reset_state_ids_all = self.get_reset_state_ids_all()
@@ -88,19 +134,19 @@ class LiberoEnv(gym.Env):
 
             def env_fn(param=env_fn_param, eid=env_id):
                 seed = param.pop("seed")
-                env = OffScreenRenderEnv(**param)
+                env = self.offscreen_render_env_cls(**param)
                 env.seed(seed)
 
                 if self.log_trajectories:
-                    from libero.libero.envs.custom.trajectory_logger import (
-                        TrajectoryLoggerWrapper,
+                    trajectory_logger_wrapper = import_trajectory_logger_wrapper(
+                        self.libero_type
                     )
 
                     log_base_dir = self.cfg.get(
                         "trajectory_log_dir", "./trajectory_logs"
                     )
 
-                    env = TrajectoryLoggerWrapper(
+                    env = trajectory_logger_wrapper(
                         env, log_dir=f"{log_base_dir}/rank_{self.rank}", env_id=eid
                     )
 
@@ -108,6 +154,125 @@ class LiberoEnv(gym.Env):
 
             env_fns.append(env_fn)
         return env_fns
+
+    def _get_plus_suffix(self) -> Optional[str]:
+        suffix = os.environ.get(
+            "LIBERO_SUFFIX",
+            self.cfg.get("perturbation_suffix", None),
+        )
+        if suffix is None:
+            return None
+        suffix = str(suffix).strip().lower()
+        if suffix == "":
+            return None
+        if suffix.endswith(".bddl"):
+            suffix = suffix[: -len(".bddl")]
+        return suffix
+
+    @staticmethod
+    def _strip_plus_perturbation_tokens(stem: str) -> str:
+        # Normalize known perturbation suffix patterns to recover canonical base task name.
+        patterns = [
+            r"_language_\d+$",
+            r"_light_\d+$",
+            r"_table_\d+$",
+            r"_tb_\d+$",
+            r"_add_\d+$",
+            r"_level\d+_sample\d+$",
+            r"\s+copy\s+\d+$",
+        ]
+        normalized = stem
+        changed = True
+        while changed:
+            changed = False
+            for pattern in patterns:
+                candidate = re.sub(pattern, "", normalized, flags=re.IGNORECASE)
+                if candidate != normalized:
+                    normalized = candidate
+                    changed = True
+        return normalized
+
+    def _get_plus_candidates(self, task) -> List[str]:
+        bddl_root = self.libero_core.get_libero_path("bddl_files")
+        folder = task.problem_folder
+        task_dir = os.path.join(bddl_root, folder)
+        if not os.path.isdir(task_dir):
+            raise RuntimeError(
+                f"LIBERO+ bddl folder not found: {task_dir}. "
+                "Please verify package install and assets."
+            )
+
+        task_stem = os.path.splitext(task.bddl_file)[0]
+        canonical_stem = self._strip_plus_perturbation_tokens(task_stem)
+        all_candidates = sorted(glob.glob(os.path.join(task_dir, "*.bddl")))
+
+        base_candidates = []
+        for candidate in all_candidates:
+            candidate_stem = os.path.splitext(os.path.basename(candidate))[0]
+            if self._strip_plus_perturbation_tokens(candidate_stem) == canonical_stem:
+                base_candidates.append(candidate)
+        return base_candidates
+
+    def _select_task_bddl_file(self, task, env_id: int) -> str:
+        bddl_root = self.libero_core.get_libero_path("bddl_files")
+        default_bddl_file = os.path.join(
+            bddl_root, task.problem_folder, task.bddl_file
+        )
+        if self.libero_type != "plus":
+            return default_bddl_file
+
+        if not os.path.exists(default_bddl_file):
+            raise RuntimeError(
+                f"LIBERO+ default bddl file not found: {default_bddl_file}"
+            )
+
+        # If no perturbation suffix is requested, keep benchmark-provided file.
+        if self.plus_suffix is None:
+            return default_bddl_file
+
+        candidates = self._get_plus_candidates(task)
+
+        suffix = self.plus_suffix
+        if suffix == "all":
+            filtered = candidates
+        else:
+            suffix_tokens = [token.strip() for token in suffix.split(",") if token]
+            if not suffix_tokens:
+                filtered = candidates
+            else:
+                filtered = []
+                for candidate in candidates:
+                    stem = os.path.splitext(os.path.basename(candidate))[0].lower()
+                    for token in suffix_tokens:
+                        token_norm = token.lstrip("_").strip().lower()
+                        if token_norm == "copy":
+                            match = " copy " in stem
+                        elif token_norm in {"level", "sample"}:
+                            match = "_level" in stem and "_sample" in stem
+                        elif token_norm in PLUS_PERTURBATION_KEYS:
+                            match = f"_{token_norm}_" in stem
+                        else:
+                            match = token_norm in stem
+                        if match:
+                            filtered.append(candidate)
+                            break
+
+        if not filtered:
+            raise RuntimeError(
+                "LIBERO_TYPE=plus requires perturbed BDDL candidates, but none matched "
+                f"for task='{task.bddl_file}', suffix='{self.plus_suffix}', "
+                f"folder='{task.problem_folder}'."
+            )
+
+        filtered = sorted(set(filtered))
+        if self.cfg.only_eval:
+            selected = filtered[(self.seed + env_id) % len(filtered)]
+        else:
+            selected = self._generator.choice(filtered)
+        print(
+            f"[LIBERO+][rank={self.rank}] env_id={env_id} selected_bddl={os.path.basename(selected)}"
+        )
+        return selected
 
     def get_env_fn_params(self, env_idx=None):
         env_fn_params = []
@@ -132,17 +297,16 @@ class LiberoEnv(gym.Env):
         task_descriptions = []
         if env_idx is None:
             env_idx = np.arange(self.cfg.num_envs)
+        env_idx_set = set(map(int, np.array(env_idx).tolist()))
         for env_id in range(self.cfg.num_envs):
             print(
                 f"env_id: {env_id}, env_idx: {env_idx}, total_num_envs: {self.cfg.num_envs}"
             )
-            if env_id not in env_idx:
+            if env_id not in env_idx_set:
                 task_descriptions.append(self.task_descriptions[env_id])
                 continue
             task = self.task_suite.get_task(self.task_ids[env_id])
-            task_bddl_file = os.path.join(
-                get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
-            )
+            task_bddl_file = self._select_task_bddl_file(task, env_id)
             # Per-task camera override if provided
             env_kwargs = {
                 **base_env_args,
@@ -489,8 +653,9 @@ class LiberoEnv(gym.Env):
 
         self.env.seed([0] * len(env_idx))
         self.env.reset(id=env_idx)
-        init_state = self._get_reset_states(env_idx=env_idx)
-        self.env.set_init_state(init_state=init_state, id=env_idx)
+        if self.libero_type != "plus":
+            init_state = self._get_reset_states(env_idx=env_idx)
+            self.env.set_init_state(init_state=init_state, id=env_idx)
 
     def reset(
         self,

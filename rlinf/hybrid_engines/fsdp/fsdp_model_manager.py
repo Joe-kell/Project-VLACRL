@@ -284,6 +284,18 @@ class FSDPModelManager:
             state_dict = FSDP.optim_state_dict(self.model, self.optimizer)
         return state_dict
 
+    def load_optimizer_state_dict(self, optim_state_dict):
+        # Controller-injected true-resume support:
+        # convert the saved full optimizer state back into the sharded optimizer
+        # layout expected by the live FSDP-wrapped model.
+        with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT):
+            state_dict_to_load = FSDP.optim_state_dict_to_load(
+                self.model,
+                self.optimizer,
+                optim_state_dict,
+            )
+        self.optimizer.load_state_dict(state_dict_to_load)
+
     def offload_fsdp_grad(self):
         for _, param in self.model.named_parameters():
             if param.grad is not None:

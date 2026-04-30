@@ -1,5 +1,5 @@
-assets: ./LIBERO/libero/libero/./assets
-bddl_files: ./LIBERO/libero/libero/./bddl_files
-benchmark_root: ./LIBERO/libero/libero
-datasets: ./LIBERO/libero/libero/../datasets
-init_states: ./LIBERO/libero/libero/./init_files
+assets: /home/s2758621/Continual_VLA_RL/LIBERO/libero/libero/assets
+bddl_files: /home/s2758621/Continual_VLA_RL/LIBERO/libero/libero/bddl_files
+benchmark_root: /home/s2758621/Continual_VLA_RL/LIBERO/libero/libero
+datasets: /home/s2758621/Continual_VLA_RL/LIBERO/libero/datasets
+init_states: /home/s2758621/Continual_VLA_RL/LIBERO/libero/libero/init_files

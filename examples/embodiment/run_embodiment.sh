@@ -4,6 +4,8 @@
 #
 # Environment Variables (optional overrides):
 #   - LIBERO_REPO_PATH: Path to LIBERO repository (defaults to ${REPO_PATH}/LIBERO)
+#   - LIBERO_TYPE: `standard` (default) or `plus`
+#   - LIBERO_SUFFIX: optional perturbation selector for LIBERO-plus
 #
 # Note: REPO_PATH is automatically set to the parent directory of examples/
 #       If you need to override it, set it before running this script.
@@ -19,8 +21,83 @@ export PYTHONPATH=${REPO_PATH}:$PYTHONPATH
 # NOTE: set LIBERO_REPO_PATH to the path of the LIBERO repo
 # Defaults to ${REPO_PATH}/LIBERO if not set
 export LIBERO_REPO_PATH="${LIBERO_REPO_PATH:-${REPO_PATH}/LIBERO}"
-# NOTE: set LIBERO_CONFIG_PATH for libero/libero/__init__.py
-export LIBERO_CONFIG_PATH=${LIBERO_REPO_PATH}
+export LIBERO_TYPE="${LIBERO_TYPE:-standard}"
+export LIBERO_SUFFIX="${LIBERO_SUFFIX:-}"
+if [ "${LIBERO_TYPE}" = "plus" ]; then
+    export LIBERO_PLUS_PATH="${LIBERO_PLUS_PATH:-${REPO_PATH}/third_party/libero_plus}"
+    # LIBERO-plus reuses LIBERO_CONFIG_PATH env var for its own config root.
+    # Keep it separate from standard LIBERO to avoid reading wrong asset paths.
+    export LIBERO_CONFIG_PATH="${LIBERO_PLUS_CONFIG_PATH:-$HOME/.liberoplus}"
+    python - <<'PY'
+import pathlib
+import liberoplus.liberoplus as l_plus
+
+asset_root = pathlib.Path(l_plus.get_libero_path("assets"))
+if not asset_root.is_dir():
+    raise RuntimeError(
+        f"LIBERO_TYPE=plus but assets directory is missing: {asset_root}"
+    )
+for required in ("scenes", "new_objects", "textures"):
+    if not (asset_root / required).is_dir():
+        raise RuntimeError(
+            f"LIBERO_TYPE=plus assets incomplete: missing '{required}' in {asset_root}"
+        )
+print(f"[run_embodiment] LIBERO+ assets OK: {asset_root}")
+PY
+else
+    # Standard LIBERO config root.
+    export LIBERO_CONFIG_PATH="${LIBERO_REPO_PATH}"
+    # BEGIN LIBERO_STANDARD_PATH_NORMALIZATION_HOTFIX
+    # Rollback instruction: remove this block through the matching END marker below.
+    # Ray workers can run with a different CWD, so relative paths in LIBERO config
+    # become brittle. Rewrite non-absolute entries to absolute repo-local paths.
+    python - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+config_dir = Path(os.environ["LIBERO_CONFIG_PATH"]).expanduser().resolve()
+config_file = config_dir / "config.yaml"
+benchmark_root = (
+    Path(os.environ["LIBERO_REPO_PATH"]).expanduser().resolve() / "libero" / "libero"
+)
+
+if not benchmark_root.is_dir():
+    raise RuntimeError(
+        f"LIBERO benchmark root does not exist: {benchmark_root}. "
+        "Check LIBERO_REPO_PATH."
+    )
+
+config_dir.mkdir(parents=True, exist_ok=True)
+cfg = {}
+if config_file.exists():
+    loaded = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            f"Invalid LIBERO config format at {config_file}. Expected a YAML mapping."
+        )
+    cfg = loaded
+
+defaults = {
+    "benchmark_root": str(benchmark_root),
+    "bddl_files": str(benchmark_root / "bddl_files"),
+    "init_states": str(benchmark_root / "init_files"),
+    "datasets": str((benchmark_root / ".." / "datasets").resolve()),
+    "assets": str(benchmark_root / "assets"),
+}
+
+for key, absolute_path in defaults.items():
+    current = cfg.get(key)
+    if isinstance(current, str) and os.path.isabs(current):
+        continue
+    cfg[key] = absolute_path
+
+config_file.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+print(f"[run_embodiment] Standard LIBERO config normalized: {config_file}")
+PY
+    # END LIBERO_STANDARD_PATH_NORMALIZATION_HOTFIX
+fi
 
 export PYTHONPATH=${LIBERO_REPO_PATH}:$PYTHONPATH
 export CUDA_LAUNCH_BLOCKING=1
@@ -64,11 +141,20 @@ fi
 # Build log directory path with config tag if present
 # If LOG_DIR is already set (e.g., by crl_experiment scripts), use it as-is
 # Otherwise, create default path with config tag if present
+LIBERO_VARIANT_LOG_SUFFIX=""
+if [ "${LIBERO_TYPE}" != "standard" ]; then
+    LIBERO_VARIANT_LOG_SUFFIX="_${LIBERO_TYPE}"
+    if [ -n "${LIBERO_SUFFIX}" ]; then
+        SAFE_LIBERO_SUFFIX=$(echo "${LIBERO_SUFFIX}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/_/g')
+        LIBERO_VARIANT_LOG_SUFFIX="${LIBERO_VARIANT_LOG_SUFFIX}_${SAFE_LIBERO_SUFFIX}"
+    fi
+fi
+
 if [ -z "${LOG_DIR}" ]; then
     if [ -n "${CONFIG_TAG}" ]; then
-        LOG_DIR="${REPO_PATH}/logs_${CONFIG_TAG}/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
+        LOG_DIR="${REPO_PATH}/logs_${CONFIG_TAG}${LIBERO_VARIANT_LOG_SUFFIX}/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
     else
-        LOG_DIR="${REPO_PATH}/logs/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
+        LOG_DIR="${REPO_PATH}/logs${LIBERO_VARIANT_LOG_SUFFIX}/temp/run_$(date +'%Y%m%d-%H:%M:%S')"
     fi
 fi
 MEGA_LOG_FILE="${LOG_DIR}/run_embodiment.log"

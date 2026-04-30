@@ -8,7 +8,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=1400G
-#SBATCH --gres=gpu:nvidia_h200:1
+#SBATCH --gres=gpu:nvidia_h200:4
 
 
 set -euo pipefail
@@ -21,7 +21,7 @@ set -euo pipefail
 # Optional env overrides:
 #   CONFIG_NAME      (default: crl_experiment/libero_object_grpo_openvlaoft_object)
 #   TASK_ID          (default: 5)
-#   EPOCHS           (default: 10)
+#   EPOCHS           (default: 1 when LIGHTWEIGHT_SMOKE=1, else 10)
 #   SEED             (default: 1234)
 #   EXPERIMENT_NAME  (default: rl_openvlaoft_object_h200)
 #   MODEL_REPO       (default: Haozhan72/Openvla-oft-SFT-libero-object-traj1)
@@ -35,16 +35,22 @@ set -euo pipefail
 #   BASE_GROUP_SIZE        (default: 8; CRL baseline)
 #   BASE_NUM_GROUP_ENVS    (default: 8; CRL baseline)
 #   BASE_ROLLOUT_EPOCH     (default: 16; CRL baseline)
-#   ACTOR_GPU_MAP    (default: 0-1)
-#   ROLLOUT_GPU_MAP  (default: 2)
-#   ENV_GPU_MAP      (default: 3)
+#   ACTOR_GPU_MAP    (default: 0-1 when LIGHTWEIGHT_SMOKE=1, else 0-1)
+#   ROLLOUT_GPU_MAP  (default: 2 when LIGHTWEIGHT_SMOKE=1, else 2)
+#   ENV_GPU_MAP      (default: 3 when LIGHTWEIGHT_SMOKE=1, else 3)
 #   SMOKE_GROUP_SIZE (default: 2)
 #   SMOKE_NUM_GROUP_ENVS      (default: 2)
-#   SMOKE_MICRO_BATCH_SIZE    (default: 8)
-#   SMOKE_GLOBAL_BATCH_SIZE   (default: 32)
-#   SMOKE_ROLLOUT_EPOCH       (default: 2)
-#   SMOKE_EVAL_ROLLOUT_EPOCH  (default: 2)
+#   SMOKE_MICRO_BATCH_SIZE    (default: 1 when LIGHTWEIGHT_SMOKE=1, else 8)
+#   SMOKE_GLOBAL_BATCH_SIZE   (default: 2 when LIGHTWEIGHT_SMOKE=1, else 32)
+#   SMOKE_ROLLOUT_EPOCH       (default: 1 when LIGHTWEIGHT_SMOKE=1, else 2)
+#   SMOKE_EVAL_ROLLOUT_EPOCH  (default: 1 when LIGHTWEIGHT_SMOKE=1, else 2)
 #   SMOKE_SAVE_INTERVAL       (default: 1)
+#   LIGHTWEIGHT_SMOKE (default: 1; force a very light smoke run that collects
+#                      minimal rollout data and executes at least one train step)
+#   LIBERO_TYPE       (default: standard; standard|pro|plus)
+#   VLA_TYPE          (default: auto-derived from CONFIG_NAME; e.g. openvlaoft)
+#   RL_USED           (default: auto-derived from CONFIG_NAME; e.g. grpo)
+#   REPRO_BASE_DIR    (default: /home/s2758621/Continual_VLA_RL/logs_libero_plus)
 
 DEFAULT_REPO_ROOT="/home/s2758621/Continual_VLA_RL"
 
@@ -96,27 +102,144 @@ mkdir -p "$HF_HUB_CACHE" "$HF_XET_CACHE" "$HF_DATASETS_CACHE"
 
 CONFIG_NAME="${CONFIG_NAME:-crl_experiment/libero_object_grpo_openvlaoft_object}"
 TASK_ID="${TASK_ID:-5}"
-EPOCHS="${EPOCHS:-10}"
+LIGHTWEIGHT_SMOKE="${LIGHTWEIGHT_SMOKE:-1}"
+if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+  EPOCHS="${EPOCHS:-1}"
+else
+  EPOCHS="${EPOCHS:-10}"
+fi
 SEED="${SEED:-1234}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-rl_openvlaoft_object_h200}"
 MODEL_REPO="${MODEL_REPO:-Haozhan72/Openvla-oft-SFT-libero-object-traj1}"
 MODEL_DIR="${MODEL_DIR:-$REPO_ROOT/model/Openvla-oft-SFT-libero-object-traj1}"
 export LIBERO_REPO_PATH="${LIBERO_REPO_PATH:-$REPO_ROOT/LIBERO}"
-USE_SMOKE_SCALE="${USE_SMOKE_SCALE:-0}"
-MATCH_CRL_SAMPLE_BUDGET="${MATCH_CRL_SAMPLE_BUDGET:-1}"
+export LIBERO_TYPE="${LIBERO_TYPE:-standard}"
+if [[ -z "${USE_SMOKE_SCALE:-}" ]]; then
+  if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+    USE_SMOKE_SCALE="1"
+  else
+    USE_SMOKE_SCALE="0"
+  fi
+fi
+if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+  MATCH_CRL_SAMPLE_BUDGET="${MATCH_CRL_SAMPLE_BUDGET:-0}"
+else
+  MATCH_CRL_SAMPLE_BUDGET="${MATCH_CRL_SAMPLE_BUDGET:-1}"
+fi
 BASE_GROUP_SIZE="${BASE_GROUP_SIZE:-8}"
 BASE_NUM_GROUP_ENVS="${BASE_NUM_GROUP_ENVS:-8}"
 BASE_ROLLOUT_EPOCH="${BASE_ROLLOUT_EPOCH:-16}"
-ACTOR_GPU_MAP="${ACTOR_GPU_MAP:-0-1}"
-ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-2}"
-ENV_GPU_MAP="${ENV_GPU_MAP:-3}"
-SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-2}"
-SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-2}"
-SMOKE_MICRO_BATCH_SIZE="${SMOKE_MICRO_BATCH_SIZE:-8}"
-SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-32}"
-SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-2}"
-SMOKE_EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-2}"
-SMOKE_SAVE_INTERVAL="${SMOKE_SAVE_INTERVAL:-1}"
+if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+  ACTOR_GPU_MAP="${ACTOR_GPU_MAP:-0-1}"
+  ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-2}"
+  ENV_GPU_MAP="${ENV_GPU_MAP:-3}"
+  # Keep lightweight defaults valid for GRPO (group_size must be > 1).
+  SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-2}"
+  SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-2}"
+  SMOKE_MICRO_BATCH_SIZE="${SMOKE_MICRO_BATCH_SIZE:-1}"
+  SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-2}"
+  SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-1}"
+  SMOKE_EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-1}"
+  SMOKE_SAVE_INTERVAL="${SMOKE_SAVE_INTERVAL:-1}"
+else
+  ACTOR_GPU_MAP="${ACTOR_GPU_MAP:-0-1}"
+  ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-2}"
+  ENV_GPU_MAP="${ENV_GPU_MAP:-3}"
+  SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-2}"
+  SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-2}"
+  SMOKE_MICRO_BATCH_SIZE="${SMOKE_MICRO_BATCH_SIZE:-8}"
+  SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-32}"
+  SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-2}"
+  SMOKE_EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-2}"
+  SMOKE_SAVE_INTERVAL="${SMOKE_SAVE_INTERVAL:-1}"
+fi
+
+count_gpu_slots() {
+  local map="$1"
+  local count=0
+  local token
+  local start
+  local end
+  local tmp
+
+  IFS=',' read -r -a tokens <<< "$map"
+  for token in "${tokens[@]}"; do
+    token="${token//[[:space:]]/}"
+    [[ -z "$token" ]] && continue
+    if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      start="${BASH_REMATCH[1]}"
+      end="${BASH_REMATCH[2]}"
+      if (( end < start )); then
+        tmp="$start"
+        start="$end"
+        end="$tmp"
+      fi
+      count=$((count + end - start + 1))
+    elif [[ "$token" =~ ^[0-9]+$ ]]; then
+      count=$((count + 1))
+    else
+      echo "ERROR: invalid GPU map token '$token' in map '$map'"
+      exit 1
+    fi
+  done
+  echo "$count"
+}
+
+if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+  if ! [[ "$SMOKE_MICRO_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( SMOKE_MICRO_BATCH_SIZE < 1 )); then
+    echo "ERROR: SMOKE_MICRO_BATCH_SIZE must be a positive integer, got: $SMOKE_MICRO_BATCH_SIZE"
+    exit 1
+  fi
+  if ! [[ "$SMOKE_GLOBAL_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( SMOKE_GLOBAL_BATCH_SIZE < 1 )); then
+    echo "ERROR: SMOKE_GLOBAL_BATCH_SIZE must be a positive integer, got: $SMOKE_GLOBAL_BATCH_SIZE"
+    exit 1
+  fi
+
+  ACTOR_WORLD_SIZE="$(count_gpu_slots "$ACTOR_GPU_MAP")"
+  if (( ACTOR_WORLD_SIZE < 2 )); then
+    echo "ERROR: LIGHTWEIGHT_SMOKE requires multi-actor placement to avoid single-actor flattening issues."
+    echo "       Got ACTOR_GPU_MAP='$ACTOR_GPU_MAP' (world_size=$ACTOR_WORLD_SIZE)."
+    echo "       Use at least two actor GPUs, e.g. ACTOR_GPU_MAP=0-1."
+    exit 1
+  fi
+
+  if (( SMOKE_GLOBAL_BATCH_SIZE % (SMOKE_MICRO_BATCH_SIZE * ACTOR_WORLD_SIZE) != 0 )); then
+    echo "ERROR: Invalid smoke batch arithmetic:"
+    echo "       SMOKE_GLOBAL_BATCH_SIZE=$SMOKE_GLOBAL_BATCH_SIZE"
+    echo "       SMOKE_MICRO_BATCH_SIZE=$SMOKE_MICRO_BATCH_SIZE"
+    echo "       actor_world_size=$ACTOR_WORLD_SIZE"
+    echo "       Requirement: global % (micro * actor_world_size) == 0"
+    echo "       Example valid values: SMOKE_GLOBAL_BATCH_SIZE=2 SMOKE_MICRO_BATCH_SIZE=1 with ACTOR_GPU_MAP=0-1."
+    exit 1
+  fi
+fi
+
+if [[ "$CONFIG_NAME" == *openvlaoft* ]]; then
+  VLA_TYPE_DEFAULT="openvlaoft"
+elif [[ "$CONFIG_NAME" == *openvla* ]]; then
+  VLA_TYPE_DEFAULT="openvla"
+elif [[ "$CONFIG_NAME" == *simple_cnn* ]]; then
+  VLA_TYPE_DEFAULT="simple_cnn"
+elif [[ "$CONFIG_NAME" == *pi0* ]]; then
+  VLA_TYPE_DEFAULT="pi0"
+else
+  VLA_TYPE_DEFAULT="unknown_vla"
+fi
+VLA_TYPE="${VLA_TYPE:-$VLA_TYPE_DEFAULT}"
+
+if [[ "$CONFIG_NAME" == *grpo* ]]; then
+  RL_USED_DEFAULT="grpo"
+elif [[ "$CONFIG_NAME" == *ppo* ]]; then
+  RL_USED_DEFAULT="ppo"
+elif [[ "$CONFIG_NAME" == *nft* ]]; then
+  RL_USED_DEFAULT="nft"
+else
+  RL_USED_DEFAULT="unknown_rl"
+fi
+RL_USED="${RL_USED:-$RL_USED_DEFAULT}"
+RUN_NAME="${VLA_TYPE}_${LIBERO_TYPE}_${RL_USED}"
+REPRO_BASE_DIR="${REPRO_BASE_DIR:-/home/s2758621/Continual_VLA_RL/logs_libero_plus}"
+mkdir -p "$REPRO_BASE_DIR"
 
 # Preserve approximate CRL sample budget when using reduced smoke scaling.
 EFFECTIVE_EPOCHS="$EPOCHS"
@@ -147,7 +270,7 @@ export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,ENV}"
 
 # Force training/eval artifact logs into repo logs directory as well.
 JOB_TAG="${SLURM_JOB_ID:-manual_$(date +%Y%m%d_%H%M%S)}"
-export LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/${EXPERIMENT_NAME}_${JOB_TAG}}"
+export LOG_DIR="${LOG_DIR:-$REPRO_BASE_DIR/${RUN_NAME}/${JOB_TAG}}"
 mkdir -p "$LOG_DIR"
 
 report_failure() {
@@ -172,6 +295,7 @@ trap report_failure ERR
 echo "==== OpenVLA-OFT Smoke Test ===="
 echo "Repo root:        $REPO_ROOT"
 echo "Config:           $CONFIG_NAME"
+echo "LIGHTWEIGHT_SMOKE: $LIGHTWEIGHT_SMOKE"
 echo "Task ID:          $TASK_ID"
 echo "Epochs (input):   $EPOCHS"
 echo "Epochs (effective): $EFFECTIVE_EPOCHS"
@@ -179,6 +303,11 @@ echo "Seed:             $SEED"
 echo "Experiment name:  $EXPERIMENT_NAME"
 echo "Model dir:        $MODEL_DIR"
 echo "LIBERO path:      $LIBERO_REPO_PATH"
+echo "LIBERO_TYPE:      $LIBERO_TYPE"
+echo "VLA_TYPE:         $VLA_TYPE"
+echo "RL_USED:          $RL_USED"
+echo "RUN_NAME:         $RUN_NAME"
+echo "REPRO_BASE_DIR:   $REPRO_BASE_DIR"
 echo "Conda env:        ${CONDA_DEFAULT_ENV:-<unknown>}"
 echo "HF_HOME:          $HF_HOME"
 echo "HF_HUB_CACHE:     $HF_HUB_CACHE"
@@ -202,6 +331,8 @@ if [[ "$USE_SMOKE_SCALE" == "1" ]]; then
 fi
 echo "Run LOG_DIR:      $LOG_DIR"
 echo
+
+cp "$0" "$LOG_DIR/TEST.sh.snapshot" 2>/dev/null || true
 
 python - <<'PY'
 import hydra, torch
@@ -235,6 +366,32 @@ if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   exit 1
 fi
 
+if [[ "$LIBERO_TYPE" == "plus" ]]; then
+  python - <<'PY'
+import importlib
+import sys
+
+missing = []
+for module_name in ("liberoplus.liberoplus", "gym"):
+    try:
+        importlib.import_module(module_name)
+    except Exception as exc:
+        missing.append((module_name, str(exc)))
+
+if missing:
+    print("ERROR: LIBERO_TYPE=plus dependency preflight failed:")
+    for module_name, reason in missing:
+        print(f"  - {module_name}: {reason}")
+    print("Install/repair with:")
+    print("  python -m pip install -r third_party/libero_plus/requirements.txt")
+    print("  python -m pip install -r third_party/libero_plus/extra_requirements.txt")
+    print("  python -m pip install -e third_party/libero_plus")
+    sys.exit(1)
+
+print("LIBERO+ dependency preflight OK (liberoplus + gym).")
+PY
+fi
+
 CMD=(
   bash examples/embodiment/run_embodiment.sh "$CONFIG_NAME"
   "env.fixed_task_ids=[$TASK_ID]"
@@ -260,6 +417,26 @@ if [[ "$USE_SMOKE_SCALE" == "1" ]]; then
   )
 fi
 
+if [[ "$LIGHTWEIGHT_SMOKE" == "1" ]]; then
+  CMD+=(
+    # Force minimal data collection and a minimal train pass.
+    "runner.max_epochs=1"
+    "runner.save_interval=1"
+    "algorithm.rollout_epoch=1"
+    "algorithm.eval_rollout_epoch=1"
+    # GRPO validation requires group_size > 1.
+    "algorithm.group_size=$SMOKE_GROUP_SIZE"
+    "algorithm.num_group_envs=$SMOKE_NUM_GROUP_ENVS"
+    "actor.global_batch_size=$SMOKE_GLOBAL_BATCH_SIZE"
+    "actor.micro_batch_size=$SMOKE_MICRO_BATCH_SIZE"
+    "env.train.max_episode_steps=8"
+    "env.eval.max_episode_steps=8"
+    "env.eval.num_envs=1"
+    "env.train.video_cfg.save_video=False"
+    "env.eval.video_cfg.save_video=False"
+  )
+fi
+
 echo "Running smoke test command:"
 printf '  %q' "${CMD[@]}"
 echo
@@ -267,5 +444,36 @@ echo
 
 "${CMD[@]}"
 
+GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+GIT_STATUS="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
+REPRO_SUMMARY_FILE="${REPRO_SUMMARY_FILE:-$REPRO_BASE_DIR/$RUN_NAME/repro_summary.txt}"
+{
+  echo "run_name=$RUN_NAME"
+  echo "vla_type=$VLA_TYPE"
+  echo "libero_type=$LIBERO_TYPE"
+  echo "rl_used=$RL_USED"
+  echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "repo_root=$REPO_ROOT"
+  echo "git_commit=$GIT_COMMIT"
+  echo "config_name=$CONFIG_NAME"
+  echo "task_id=$TASK_ID"
+  echo "seed=$SEED"
+  echo "lightweight_smoke=$LIGHTWEIGHT_SMOKE"
+  echo "use_smoke_scale=$USE_SMOKE_SCALE"
+  echo "effective_epochs=$EFFECTIVE_EPOCHS"
+  echo "log_dir=$LOG_DIR"
+  echo "libero_repo_path=$LIBERO_REPO_PATH"
+  echo "model_dir=$MODEL_DIR"
+  echo "command="
+  printf '%q ' "${CMD[@]}"
+  echo
+  echo "git_status_porcelain_start"
+  if [[ -n "$GIT_STATUS" ]]; then
+    printf '%s\n' "$GIT_STATUS"
+  fi
+  echo "git_status_porcelain_end"
+} > "$REPRO_SUMMARY_FILE"
+
 echo
 echo "Smoke test completed successfully."
+echo "Repro summary file: $REPRO_SUMMARY_FILE"

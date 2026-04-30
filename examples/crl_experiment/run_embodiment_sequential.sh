@@ -18,6 +18,8 @@ MANUAL_CHECKPOINT_PATH=$2
 MAX_EPOCH=$3
 CONFIG_NAME=${4:-crl_experiment/libero_spatial_grpo_openvlaoft_spatial}
 SEED=${5:-1234}
+LIBERO_TYPE=${LIBERO_TYPE:-standard}
+LIBERO_SUFFIX=${LIBERO_SUFFIX:-}
 
 # Log subdirectory for this experiment type
 EXPERIMENT_TYPE="sequential"
@@ -57,6 +59,15 @@ fi
 if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
     echo "ERROR: SEED must be a non-negative integer, got: $SEED"
     exit 1
+fi
+
+VARIANT_LOG_SUFFIX=""
+if [ "$LIBERO_TYPE" != "standard" ]; then
+    VARIANT_LOG_SUFFIX="_${LIBERO_TYPE}"
+    if [ -n "$LIBERO_SUFFIX" ]; then
+        SAFE_LIBERO_SUFFIX=$(echo "$LIBERO_SUFFIX" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/_/g')
+        VARIANT_LOG_SUFFIX="${VARIANT_LOG_SUFFIX}_${SAFE_LIBERO_SUFFIX}"
+    fi
 fi
 
 mkdir -p "logs/${EXPERIMENT_TYPE}"
@@ -99,7 +110,7 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
         CHECKPOINT_PATH=""
     else
         PREV_TASK_ID=$((TASK_ID - 1))
-        PREV_LOG_DIR="./logs/${EXPERIMENT_TYPE}/task_${PREV_TASK_ID}_seed${SEED}"
+        PREV_LOG_DIR="./logs/${EXPERIMENT_TYPE}/task_${PREV_TASK_ID}_seed${SEED}${VARIANT_LOG_SUFFIX}"
         if [ -n "$CONFIG_TAG" ]; then
             PREV_LOG_DIR_TRANSFORMED=$(inject_config_tag_into_log_path "$PREV_LOG_DIR" "$CONFIG_TAG")
             if [ -z "$PREV_LOG_DIR_TRANSFORMED" ]; then
@@ -130,7 +141,7 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
             SOURCE_TASK="${BASH_REMATCH[1]}"
             if [[ "$CHECKPOINT_PATH" =~ global_step_([0-9]+) ]]; then
                 SOURCE_STEP="${BASH_REMATCH[1]}"
-                LOG_DIR="./logs/${EXPERIMENT_TYPE}/task_${TASK_ID}_from_task_${SOURCE_TASK}_step_${SOURCE_STEP}_seed${SEED}"
+                LOG_DIR="./logs/${EXPERIMENT_TYPE}/task_${TASK_ID}_from_task_${SOURCE_TASK}_step_${SOURCE_STEP}_seed${SEED}${VARIANT_LOG_SUFFIX}"
             else
                 echo "ERROR: Could not extract global_step from checkpoint path: $CHECKPOINT_PATH"
                 echo "       Expected format: .../checkpoints/global_step_<M>/actor"
@@ -144,7 +155,7 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
             break
         fi
     else
-        LOG_DIR="./logs/${EXPERIMENT_TYPE}/task_${TASK_ID}_seed${SEED}"
+        LOG_DIR="./logs/${EXPERIMENT_TYPE}/task_${TASK_ID}_seed${SEED}${VARIANT_LOG_SUFFIX}"
     fi
     
     # Inject config tag into LOG_DIR
@@ -184,6 +195,10 @@ for TASK_ID in $(seq $TASK_START $TASK_END); do
     echo "  Checkpoint Save Path: $LOG_DIR"
     echo "  Config Name: $CONFIG_NAME"
     echo "  Random Seed: $SEED"
+    echo "  LIBERO_TYPE: $LIBERO_TYPE"
+    if [ -n "$LIBERO_SUFFIX" ]; then
+        echo "  LIBERO_SUFFIX: $LIBERO_SUFFIX"
+    fi
     
     if [ -n "$CHECKPOINT_PATH" ]; then
         if [ ! -d "$CHECKPOINT_PATH" ]; then

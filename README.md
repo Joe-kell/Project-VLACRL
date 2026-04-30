@@ -16,6 +16,7 @@ Official implementation for continual reinforcement learning (CRL) with Vision-L
 - [Overview](#overview)
 - [Installation](#installation)
 - [Downloading Models](#downloading-models)
+- [LIBERO-Plus Assets (Optional)](#libero-plus-assets-optional)
 - [Quick Start](#quick-start)
 - [CRL Experiment Scripts](#crl-experiment-scripts)
 - [Configuration](#configuration)
@@ -108,6 +109,68 @@ The LIBERO environment path defaults to `./LIBERO` (the bundled copy). To use a 
 
 ```bash
 export LIBERO_REPO_PATH=/path/to/your/LIBERO
+```
+
+---
+
+## LIBERO-Plus Assets (Optional)
+
+`third_party/libero_plus` is vendored as code only. **Do not commit assets into git.**  
+Each user/machine should download LIBERO-plus assets locally after environment setup.
+
+### Install LIBERO-plus Python package
+
+```bash
+conda activate vlacrl
+pip install -r third_party/libero_plus/extra_requirements.txt
+pip install -e third_party/libero_plus
+```
+
+### Download and extract assets
+
+```bash
+export LIBERO_PLUS_PACKAGE_DIR=$(python - <<'PY'
+import pathlib, liberoplus.liberoplus as lp
+print(pathlib.Path(lp.__file__).resolve().parent)
+PY
+)
+
+python - <<'PY'
+import os
+from huggingface_hub import hf_hub_download
+dst = os.environ["LIBERO_PLUS_PACKAGE_DIR"]
+p = hf_hub_download(
+    repo_id="Sylvest/LIBERO-plus",
+    repo_type="dataset",
+    filename="assets.zip",
+    local_dir=dst,
+    local_dir_use_symlinks=False,
+)
+print("Downloaded:", p)
+PY
+
+unzip -o "${LIBERO_PLUS_PACKAGE_DIR}/assets.zip" -d "${LIBERO_PLUS_PACKAGE_DIR}"
+```
+
+If your archive extracts into a nested `inspire/.../LIBERO-plus-0/assets` directory, normalize it:
+
+```bash
+PKG="${LIBERO_PLUS_PACKAGE_DIR}"
+SRC=$(find "$PKG/inspire" -type d -path '*/LIBERO-plus-0/assets' | head -n1)
+mv "$SRC" "$PKG/assets"
+rm -rf "$PKG/inspire"
+```
+
+### Verify assets and run mode
+
+```bash
+test -d "${LIBERO_PLUS_PACKAGE_DIR}/assets/scenes" && echo "assets layout OK"
+
+# Use LIBERO-plus at runtime
+export LIBERO_TYPE=plus
+
+# Optional: select a perturbation suffix used by plus BDDL selection logic
+export LIBERO_SUFFIX=_v1
 ```
 
 ---

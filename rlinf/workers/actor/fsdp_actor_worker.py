@@ -198,6 +198,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 torch.distributed.init_process_group(backend="nccl")
 
         self.setup_model_and_optimizer()
+        # Controller-injected true-resume support:
+        # LoRA weights are loaded during model setup via actor.model.lora_path;
+        # this second step restores the matching optimizer state from optim.pt.
+        self._restore_resume_optimizer_state_if_available()
 
         # For EWC: capture the loaded model's LoRA parameters as old_params reference
         # This is done AFTER setup_model_and_optimizer() which loads the LoRA checkpoint.
@@ -246,6 +250,29 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             torch.cuda.synchronize()
             gc.collect()
             torch.cuda.empty_cache()
+
+    def _restore_resume_optimizer_state_if_available(self):
+        # Controller-injected true-resume hook used by TEST_CONTROLLER.sh for
+        # mid-task walltime recovery. Safe to remove if only warm-start LoRA
+        # resumes are needed.
+        resume_checkpoint_path = self.cfg.actor.get("resume_checkpoint_path", None)
+        if not resume_checkpoint_path:
+            return
+
+        optim_path = os.path.join(resume_checkpoint_path, "optim.pt")
+        if not os.path.isfile(optim_path):
+            if self._rank == 0:
+                print(
+                    f"Resume checkpoint provided but optimizer state is missing at {optim_path}. "
+                    "Continuing with freshly initialized optimizer."
+                )
+            return
+
+        if self._rank == 0:
+            print(f"Loading optimizer state from {optim_path}")
+
+        optim_state = torch.load(optim_path, map_location="cpu")
+        self.load_optimizer_state_dict(optim_state)
 
     def preallocate_memory(self):
         """Preallocate GPU memory to prevent OOM during rollout."""
@@ -1270,4 +1297,3 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             print(f"[EWC] Saving {len(fisher_to_save)} Fisher parameters")
             save_ewc_data(fisher_to_save, save_path)
             print(f"✓ EWC data saved to {save_path}")
-

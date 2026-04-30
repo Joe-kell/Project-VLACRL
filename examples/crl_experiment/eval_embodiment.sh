@@ -8,6 +8,9 @@
 # Example (LoRA): ./examples/crl_experiment/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20
 # Example (simple_cnn): ./examples/crl_experiment/eval_embodiment.sh logs/simple_cnn/task_0_seed1234 10 crl_experiment/libero_spatial_grpo_simple_cnn_eval
 # Example (cam suite config): ./examples/crl_experiment/eval_embodiment.sh logs/bcrl_logit/0.3/task_0 20 crl_experiment/libero_spatial_grpo_openvlaoft_eval_cam
+# Optional env vars:
+#   LIBERO_TYPE=plus
+#   LIBERO_SUFFIX=<suffix|all>
 #
 # Note: CHECKPOINT_LOCATION should be relative to workspace root (e.g., logs/bcrl_logit/0.3/task_0)
 #       For LoRA: The script will construct: ${WORKSPACE_ROOT}/${CHECKPOINT_LOCATION}/checkpoints/global_step_${STEP_NUMBER}/actor/
@@ -17,6 +20,8 @@
 CHECKPOINT_LOCATION=$1
 STEP_NUMBER=$2
 CONFIG_NAME=$3
+LIBERO_TYPE=${LIBERO_TYPE:-standard}
+LIBERO_SUFFIX=${LIBERO_SUFFIX:-}
 
 # Default STEP_NUMBER to 10 if not provided
 if [ -z "$STEP_NUMBER" ]; then
@@ -95,6 +100,10 @@ else
 fi
 echo "Global Step Number: $STEP_NUMBER"
 echo "Config Name: $CONFIG_NAME"
+echo "LIBERO_TYPE: $LIBERO_TYPE"
+if [ -n "$LIBERO_SUFFIX" ]; then
+    echo "LIBERO_SUFFIX: $LIBERO_SUFFIX"
+fi
 echo "Start Time: $(date)"
 echo ""
 

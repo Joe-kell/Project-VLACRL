@@ -5,7 +5,7 @@
 #SBATCH --partition=ICF-Free
 #SBATCH --time=08:00:00
 #SBATCH --nodes=2
-#SBATCH --nodelist=crannog[01-02]
+#SBATCH --nodelist=crannog[03-04]
 #SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=60
@@ -32,7 +32,7 @@ set -euo pipefail
 #   CONDA_ENV_NAME   (default: vlacrl)
 #   CONDA_BASE       (default: $HOME/miniconda3)
 #   LIBERO_REPO_PATH (default: <repo>/LIBERO)
-#   USE_SMOKE_SCALE  (default: 1; set 1 to run reduced smoke scaling)
+#   USE_SMOKE_SCALE  (default: 0; set 1 to run reduced smoke scaling)
 #   MATCH_CRL_SAMPLE_BUDGET (default: 1; when smoke scaling is on, auto-increase
 #                            runner.max_epochs to match baseline CRL sample budget)
 #   BASE_GROUP_SIZE        (default: 8; CRL baseline)
@@ -54,18 +54,20 @@ set -euo pipefail
 #   EVAL_CAMERA_RES   (default: 256; set 128 for extra render stability)
 #   AUTO_COMPONENT_PLACEMENT (default: 1; auto-map global GPU IDs by Ray node order)
 #   ACTOR_GPU_COUNT   (default: 4; GPUs on head node for actor)
-#   WORKER_ROLLOUT_GPU_COUNT (default: 2; GPUs on worker node for rollout)
-#   WORKER_ENV_GPU_COUNT     (default: 2; GPUs on worker node for env)
+#   WORKER_ROLLOUT_GPU_COUNT (default: 3; GPUs on worker node for rollout)
+#   WORKER_ENV_GPU_COUNT     (default: 1; GPUs on worker node for env)
 #   ACTOR_GPU_MAP    (default: 0-3)
-#   ROLLOUT_GPU_MAP  (default: 4-5)
-#   ENV_GPU_MAP      (default: 6-7)
-#   SMOKE_GROUP_SIZE (default: 6)
-#   SMOKE_NUM_GROUP_ENVS      (default: 6)
-#   SMOKE_MICRO_BATCH_SIZE    (default: 16)
-#   SMOKE_GLOBAL_BATCH_SIZE   (default: 256)
-#   SMOKE_ROLLOUT_EPOCH       (default: 2)
+#   ROLLOUT_GPU_MAP  (default: 4-6)
+#   ENV_GPU_MAP      (default: 7)
+#   SMOKE_GROUP_SIZE (default: 8)
+#   SMOKE_NUM_GROUP_ENVS      (default: 12)
+#   SMOKE_MICRO_BATCH_SIZE    (default: 48)
+#   SMOKE_GLOBAL_BATCH_SIZE   (default: 8448)
+#   SMOKE_ROLLOUT_EPOCH       (default: 20)
 #   SMOKE_EVAL_ROLLOUT_EPOCH  (default: 2)
 #   SMOKE_SAVE_INTERVAL       (default: 25)
+#   LORA_PATH        (optional: load LoRA adapter checkpoint dir)
+#   RAY_ONLY         (default: 0; set 1 to validate Ray multi-node + placement only)
 
 DEFAULT_REPO_ROOT="/home/s2758621/Continual_VLA_RL"
 
@@ -123,7 +125,7 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-rl_openvlaoft_object_crannog_nodes}"
 MODEL_REPO="${MODEL_REPO:-Haozhan72/Openvla-oft-SFT-libero-object-traj1}"
 MODEL_DIR="${MODEL_DIR:-$REPO_ROOT/model/Openvla-oft-SFT-libero-object-traj1}"
 export LIBERO_REPO_PATH="${LIBERO_REPO_PATH:-$REPO_ROOT/LIBERO}"
-USE_SMOKE_SCALE="${USE_SMOKE_SCALE:-1}"
+USE_SMOKE_SCALE="${USE_SMOKE_SCALE:-0}"
 MATCH_CRL_SAMPLE_BUDGET="${MATCH_CRL_SAMPLE_BUDGET:-1}"
 BASE_GROUP_SIZE="${BASE_GROUP_SIZE:-8}"
 BASE_NUM_GROUP_ENVS="${BASE_NUM_GROUP_ENVS:-8}"
@@ -154,24 +156,32 @@ TRAIN_CAMERA_RES="${TRAIN_CAMERA_RES:-256}"
 EVAL_CAMERA_RES="${EVAL_CAMERA_RES:-256}"
 AUTO_COMPONENT_PLACEMENT="${AUTO_COMPONENT_PLACEMENT:-1}"
 ACTOR_GPU_COUNT="${ACTOR_GPU_COUNT:-4}"
-WORKER_ROLLOUT_GPU_COUNT="${WORKER_ROLLOUT_GPU_COUNT:-2}"
-WORKER_ENV_GPU_COUNT="${WORKER_ENV_GPU_COUNT:-2}"
+WORKER_ROLLOUT_GPU_COUNT="${WORKER_ROLLOUT_GPU_COUNT:-3}"
+WORKER_ENV_GPU_COUNT="${WORKER_ENV_GPU_COUNT:-1}"
 ACTOR_GPU_MAP="${ACTOR_GPU_MAP:-0-3}"
-ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-4-5}"
-ENV_GPU_MAP="${ENV_GPU_MAP:-6-7}"
-SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-6}"
-SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-6}"
-SMOKE_MICRO_BATCH_SIZE="${SMOKE_MICRO_BATCH_SIZE:-16}"
-SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-256}"
-SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-2}"
+ROLLOUT_GPU_MAP="${ROLLOUT_GPU_MAP:-4-6}"
+ENV_GPU_MAP="${ENV_GPU_MAP:-7}"
+SMOKE_GROUP_SIZE="${SMOKE_GROUP_SIZE:-8}"
+SMOKE_NUM_GROUP_ENVS="${SMOKE_NUM_GROUP_ENVS:-12}"
+SMOKE_MICRO_BATCH_SIZE="${SMOKE_MICRO_BATCH_SIZE:-48}"
+SMOKE_GLOBAL_BATCH_SIZE="${SMOKE_GLOBAL_BATCH_SIZE:-8448}"
+SMOKE_ROLLOUT_EPOCH="${SMOKE_ROLLOUT_EPOCH:-20}"
 SMOKE_EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-2}"
 SMOKE_SAVE_INTERVAL="${SMOKE_SAVE_INTERVAL:-25}"
+LORA_PATH="${LORA_PATH:-}"
+RAY_ONLY="${RAY_ONLY:-0}"
 RAY_COORD_DIR="${RAY_COORD_DIR:-$REPO_ROOT/logs/ray_coord}"
 mkdir -p "$RAY_COORD_DIR"
 RAY_HEAD_IP_FILE="${RAY_HEAD_IP_FILE:-$RAY_COORD_DIR/ray_head_ip_${JOB_TAG}.txt}"
 RAY_HEAD_ADDR_FILE="${RAY_HEAD_ADDR_FILE:-$RAY_COORD_DIR/ray_head_addr_${JOB_TAG}.txt}"
 export RAY_HEAD_IP_FILE
 export RAY_HEAD_ADDR_FILE
+
+# Python helper blocks read these from environment.
+export CONFIG_NAME
+export ACTOR_GPU_COUNT
+export WORKER_ROLLOUT_GPU_COUNT
+export WORKER_ENV_GPU_COUNT
 
 if ! [[ "$CLUSTER_NUM_NODES" =~ ^[0-9]+$ ]] || (( CLUSTER_NUM_NODES < 1 )); then
   echo "ERROR: CLUSTER_NUM_NODES must be a positive integer, got: $CLUSTER_NUM_NODES"
@@ -258,34 +268,38 @@ export LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/${EXPERIMENT_NAME}_${JOB_TAG}}"
 mkdir -p "$LOG_DIR"
 
 RAY_CLUSTER_STARTED=0
+RAY_HEAD_STEP_PID=""
+RAY_WORKER_STEP_PID=""
+RAY_HEAD_STEP_LOG="${LOG_DIR}/ray_head_step.log"
+RAY_WORKER_STEP_LOG="${LOG_DIR}/ray_worker_step.log"
 SLURM_HET_SIZE_NUM=0
 if [[ "${SLURM_HET_SIZE:-}" =~ ^[0-9]+$ ]]; then
   SLURM_HET_SIZE_NUM="${SLURM_HET_SIZE}"
 fi
 
+stop_srun_step() {
+  local pid="${1:-}"
+  local label="${2:-step}"
+  if [[ -z "$pid" ]]; then
+    return 0
+  fi
+
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "Stopping Ray ${label} step (pid=${pid})..."
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
 cleanup_ray_cluster() {
   local exit_code=$?
   trap - EXIT
 
-  if [[ "$RAY_CLUSTER_STARTED" == "1" ]]; then
+  if [[ -n "$RAY_WORKER_STEP_PID" || -n "$RAY_HEAD_STEP_PID" ]]; then
     echo
     echo "Stopping Ray cluster..."
-    if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-      if (( SLURM_HET_SIZE_NUM >= 2 )); then
-        srun --het-group=0 --nodes=1 --ntasks=1 --ntasks-per-node=1 \
-          --kill-on-bad-exit=0 \
-          bash -lc 'ray stop --force >/dev/null 2>&1 || true' || true
-        srun --het-group=1 --nodes=1 --ntasks=1 --ntasks-per-node=1 \
-          --kill-on-bad-exit=0 \
-          bash -lc 'ray stop --force >/dev/null 2>&1 || true' || true
-      else
-        srun --nodes="$CLUSTER_NUM_NODES" --ntasks="$CLUSTER_NUM_NODES" --ntasks-per-node=1 \
-          --kill-on-bad-exit=0 \
-          bash -lc 'ray stop --force >/dev/null 2>&1 || true' || true
-      fi
-    else
-      ray stop --force >/dev/null 2>&1 || true
-    fi
+    stop_srun_step "$RAY_WORKER_STEP_PID" "worker"
+    stop_srun_step "$RAY_HEAD_STEP_PID" "head"
   fi
 
   rm -f "$RAY_HEAD_IP_FILE" "$RAY_HEAD_ADDR_FILE" 2>/dev/null || true
@@ -308,9 +322,50 @@ report_failure() {
     grep -R -n -E "Traceback|CUDA|OOM|NCCL|ncclUniqueId|SIGKILL|segfault|fatal|DistBackendError" \
       "$RAY_TMPDIR"/session_latest/logs "$LOG_DIR" 2>/dev/null || true
   fi
+  if [[ -f "$RAY_HEAD_STEP_LOG" ]]; then
+    echo "--- Tail: $RAY_HEAD_STEP_LOG ---"
+    tail -n 120 "$RAY_HEAD_STEP_LOG" || true
+  fi
+  if [[ -f "$RAY_WORKER_STEP_LOG" ]]; then
+    echo "--- Tail: $RAY_WORKER_STEP_LOG ---"
+    tail -n 120 "$RAY_WORKER_STEP_LOG" || true
+  fi
   exit "$exit_code"
 }
 trap report_failure ERR
+
+wait_for_head_port() {
+  python - <<'PY'
+import os
+import socket
+import time
+
+head_ip = os.environ["RAY_HEAD_IP"]
+head_port = int(os.environ["RAY_GCS_PORT"])
+retries = int(os.environ.get("RAY_SOCKET_PRECHECK_RETRIES", "30"))
+sleep_sec = float(os.environ.get("RAY_SOCKET_PRECHECK_SLEEP_SEC", "2"))
+
+last_error = ""
+for _ in range(retries):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(3.0)
+    try:
+        sock.connect((head_ip, head_port))
+        print(f"Head port check OK: {head_ip}:{head_port}")
+        raise SystemExit(0)
+    except Exception as exc:
+        last_error = str(exc)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    time.sleep(sleep_sec)
+
+print(f"Head port check FAILED to {head_ip}:{head_port}: {last_error}")
+raise SystemExit(21)
+PY
+}
 
 start_ray_cluster() {
   if [[ -z "${SLURM_JOB_ID:-}" ]]; then
@@ -434,6 +489,7 @@ start_ray_cluster() {
   echo "Ray head address: $head_addr"
 
   export RAY_HEAD_IP="$head_ip"
+  : > "$RAY_HEAD_STEP_LOG"
   "${head_srun[@]}" --kill-on-bad-exit=1 bash -lc '
     set -euo pipefail
     ray stop --force >/dev/null 2>&1 || true
@@ -446,12 +502,23 @@ start_ray_cluster() {
       --ray-client-server-port="$RAY_HEAD_CLIENT_SERVER_PORT" \
       --min-worker-port="$RAY_HEAD_MIN_WORKER_PORT" \
       --max-worker-port="$RAY_HEAD_MAX_WORKER_PORT" \
-      --memory="$RAY_OBJECT_STORE_MEMORY" \
+      --object-store-memory="$RAY_OBJECT_STORE_MEMORY" \
       --temp-dir="$RAY_TMPDIR" \
-      --disable-usage-stats
-  '
+      --disable-usage-stats \
+      --block
+  ' > "$RAY_HEAD_STEP_LOG" 2>&1 &
+  RAY_HEAD_STEP_PID="$!"
+
+  # Ensure head is alive and accepting TCP before worker join attempts.
+  if ! kill -0 "$RAY_HEAD_STEP_PID" 2>/dev/null; then
+    echo "ERROR: Ray head step exited prematurely."
+    [[ -f "$RAY_HEAD_STEP_LOG" ]] && tail -n 120 "$RAY_HEAD_STEP_LOG" || true
+    exit 1
+  fi
+  wait_for_head_port
 
   if (( CLUSTER_NUM_NODES > 1 )); then
+    : > "$RAY_WORKER_STEP_LOG"
     "${worker_srun[@]}" --kill-on-bad-exit=1 bash -lc '
       set -euo pipefail
       python - <<'"'"'PY'"'"'
@@ -516,10 +583,18 @@ PY
         --object-manager-port="$RAY_WORKER_OBJECT_MANAGER_PORT" \
         --min-worker-port="$RAY_WORKER_MIN_WORKER_PORT" \
         --max-worker-port="$RAY_WORKER_MAX_WORKER_PORT" \
-        --memory="$RAY_OBJECT_STORE_MEMORY" \
+        --object-store-memory="$RAY_OBJECT_STORE_MEMORY" \
         --temp-dir="$RAY_TMPDIR" \
-        --disable-usage-stats
-    '
+        --disable-usage-stats \
+        --block
+    ' > "$RAY_WORKER_STEP_LOG" 2>&1 &
+    RAY_WORKER_STEP_PID="$!"
+
+    if ! kill -0 "$RAY_WORKER_STEP_PID" 2>/dev/null; then
+      echo "ERROR: Ray worker step exited prematurely."
+      [[ -f "$RAY_WORKER_STEP_LOG" ]] && tail -n 120 "$RAY_WORKER_STEP_LOG" || true
+      exit 1
+    fi
   fi
 
   python - <<'PY'
@@ -556,6 +631,124 @@ PY
 
   ray status --address="${head_addr}" || true
   RAY_CLUSTER_STARTED=1
+}
+
+validate_grpo_scaling() {
+  export EFFECTIVE_ACTOR_GPU_MAP="$ACTOR_GPU_MAP"
+  export EFFECTIVE_ROLLOUT_GPU_MAP="$ROLLOUT_GPU_MAP"
+  export EFFECTIVE_ENV_GPU_MAP="$ENV_GPU_MAP"
+  export EFFECTIVE_SMOKE_SCALE="$USE_SMOKE_SCALE"
+  export EFFECTIVE_SMOKE_GROUP_SIZE="$SMOKE_GROUP_SIZE"
+  export EFFECTIVE_SMOKE_NUM_GROUP_ENVS="$SMOKE_NUM_GROUP_ENVS"
+  export EFFECTIVE_SMOKE_GLOBAL_BATCH_SIZE="$SMOKE_GLOBAL_BATCH_SIZE"
+  export EFFECTIVE_SMOKE_MICRO_BATCH_SIZE="$SMOKE_MICRO_BATCH_SIZE"
+
+  python - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+from omegaconf import OmegaConf
+
+repo_root = Path(os.environ["REPO_ROOT"])
+config_name = os.environ["CONFIG_NAME"]
+cfg_rel = Path("examples/embodiment/config") / f"{config_name}.yaml"
+cfg_path = repo_root / cfg_rel
+
+if not cfg_path.exists():
+    print(f"ERROR: config file not found: {cfg_path}")
+    raise SystemExit(10)
+
+cfg = OmegaConf.load(cfg_path)
+
+if os.environ.get("EFFECTIVE_SMOKE_SCALE", "0") == "1":
+    cfg.algorithm.group_size = int(os.environ["EFFECTIVE_SMOKE_GROUP_SIZE"])
+    cfg.algorithm.num_group_envs = int(os.environ["EFFECTIVE_SMOKE_NUM_GROUP_ENVS"])
+    cfg.actor.global_batch_size = int(os.environ["EFFECTIVE_SMOKE_GLOBAL_BATCH_SIZE"])
+    cfg.actor.micro_batch_size = int(os.environ["EFFECTIVE_SMOKE_MICRO_BATCH_SIZE"])
+
+def parse_ids(spec: str):
+    ids = []
+    for token in str(spec).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            a, b = token.split("-", 1)
+            start, end = int(a), int(b)
+            if end < start:
+                raise ValueError(f"Invalid range {token}")
+            ids.extend(range(start, end + 1))
+        else:
+            ids.append(int(token))
+    return ids
+
+actor_ws = len(parse_ids(os.environ["EFFECTIVE_ACTOR_GPU_MAP"]))
+rollout_ws = len(parse_ids(os.environ["EFFECTIVE_ROLLOUT_GPU_MAP"]))
+env_ws = len(parse_ids(os.environ["EFFECTIVE_ENV_GPU_MAP"]))
+
+stage_num = int(cfg.rollout.pipeline_stage_num)
+algo_num_group_envs = int(cfg.algorithm.num_group_envs)
+eval_num_envs = int(cfg.env.eval.num_envs)
+group_size = int(cfg.algorithm.group_size)
+rollout_epoch = int(cfg.algorithm.rollout_epoch)
+global_bsz = int(cfg.actor.global_batch_size)
+micro_bsz = int(cfg.actor.micro_batch_size)
+
+errors = []
+
+scale_div = stage_num * env_ws
+if scale_div <= 0:
+    errors.append(f"Invalid scale divisor stage_num*env_ws={scale_div}")
+if algo_num_group_envs % scale_div != 0:
+    errors.append(
+        f"algorithm.num_group_envs ({algo_num_group_envs}) must be divisible by "
+        f"stage_num*env_world_size ({stage_num}*{env_ws}={scale_div})"
+    )
+if eval_num_envs % scale_div != 0:
+    errors.append(
+        f"env.eval.num_envs ({eval_num_envs}) must be divisible by "
+        f"stage_num*env_world_size ({stage_num}*{env_ws}={scale_div})"
+    )
+
+if actor_ws < 1:
+    errors.append(f"actor world size must be >=1, got {actor_ws}")
+if rollout_ws < 1:
+    errors.append(f"rollout world size must be >=1, got {rollout_ws}")
+if env_ws < 1:
+    errors.append(f"env world size must be >=1, got {env_ws}")
+
+if global_bsz % (micro_bsz * actor_ws) != 0:
+    errors.append(
+        f"actor.global_batch_size ({global_bsz}) must be divisible by "
+        f"actor.micro_batch_size*actor_world_size ({micro_bsz}*{actor_ws}={micro_bsz*actor_ws})"
+    )
+
+if rollout_ws % env_ws != 0:
+    errors.append(
+        f"rollout world size ({rollout_ws}) must be divisible by env world size ({env_ws})"
+    )
+
+effective_num_group_envs = algo_num_group_envs // scale_div if scale_div > 0 else -1
+per_rank_batch = global_bsz // actor_ws if actor_ws > 0 else -1
+
+if errors:
+    print("GRPO scaling preflight FAILED:")
+    for e in errors:
+        print(f" - {e}")
+    raise SystemExit(11)
+
+print("GRPO scaling preflight OK:")
+print(f"  actor_ws={actor_ws} rollout_ws={rollout_ws} env_ws={env_ws}")
+print(f"  stage_num={stage_num}")
+print(f"  algorithm.num_group_envs(raw)={algo_num_group_envs}")
+print(f"  algorithm.num_group_envs(effective)={effective_num_group_envs}")
+print(f"  env.eval.num_envs(raw)={eval_num_envs}")
+print(f"  algorithm.group_size={group_size} algorithm.rollout_epoch={rollout_epoch}")
+print(f"  actor.global_batch_size={global_bsz} actor.micro_batch_size={micro_bsz}")
+print(f"  per_actor_rank_batch={per_rank_batch}")
+print("  note=actor-side rollout split asserts still run during training.")
+PY
 }
 
 resolve_component_placement() {
@@ -754,6 +947,10 @@ echo "AUTO_COMPONENT_PLACEMENT: $AUTO_COMPONENT_PLACEMENT"
 echo "ACTOR_GPU_COUNT:  $ACTOR_GPU_COUNT"
 echo "WORKER_ROLLOUT_GPU_COUNT: $WORKER_ROLLOUT_GPU_COUNT"
 echo "WORKER_ENV_GPU_COUNT: $WORKER_ENV_GPU_COUNT"
+echo "RAY_ONLY:            $RAY_ONLY"
+if [[ -n "$LORA_PATH" ]]; then
+  echo "LORA_PATH:           $LORA_PATH"
+fi
 if [[ "$USE_SMOKE_SCALE" == "1" ]]; then
   echo "Requested placement: actor=$ACTOR_GPU_MAP rollout=$ROLLOUT_GPU_MAP env=$ENV_GPU_MAP"
   echo "Scaled rollout:   group_size=$SMOKE_GROUP_SIZE num_group_envs=$SMOKE_NUM_GROUP_ENVS"
@@ -792,14 +989,20 @@ if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   hf download "$MODEL_REPO" --local-dir "$MODEL_DIR"
 fi
 
+start_ray_cluster
+resolve_component_placement
+validate_grpo_scaling
+
+if [[ "$RAY_ONLY" == "1" ]]; then
+  echo "RAY_ONLY=1 set. Ray cluster and placement validated; exiting before model/training."
+  exit 0
+fi
+
 if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   echo "ERROR: Model download/check failed. Expected file missing:"
   echo "       $MODEL_DIR/config.json"
   exit 1
 fi
-
-start_ray_cluster
-resolve_component_placement
 
 CMD=(
   bash examples/embodiment/run_embodiment.sh "$CONFIG_NAME"
@@ -813,6 +1016,9 @@ CMD=(
   "env.train.init_params.camera_widths=$TRAIN_CAMERA_RES"
   "env.eval.init_params.camera_heights=$EVAL_CAMERA_RES"
   "env.eval.init_params.camera_widths=$EVAL_CAMERA_RES"
+  "+cluster.component_placement.actor=$ACTOR_GPU_MAP"
+  "+cluster.component_placement.rollout=$ROLLOUT_GPU_MAP"
+  "+cluster.component_placement.env=$ENV_GPU_MAP"
 )
 
 if [[ "$DISABLE_VIDEO_LOGGING" == "1" ]]; then
@@ -824,7 +1030,7 @@ fi
 
 if [[ "$USE_SMOKE_SCALE" == "1" ]]; then
   CMD+=(
-    # Keep CRL loss/objective logic from config, but scale placement + load for A40 memory.
+    # Keep CRL loss/objective logic from config, but scale load for A40 memory.
     "runner.save_interval=$SMOKE_SAVE_INTERVAL"
     "algorithm.rollout_epoch=$SMOKE_ROLLOUT_EPOCH"
     "algorithm.eval_rollout_epoch=$SMOKE_EVAL_ROLLOUT_EPOCH"
@@ -832,10 +1038,15 @@ if [[ "$USE_SMOKE_SCALE" == "1" ]]; then
     "algorithm.num_group_envs=$SMOKE_NUM_GROUP_ENVS"
     "actor.global_batch_size=$SMOKE_GLOBAL_BATCH_SIZE"
     "actor.micro_batch_size=$SMOKE_MICRO_BATCH_SIZE"
-    "+cluster.component_placement.actor=$ACTOR_GPU_MAP"
-    "+cluster.component_placement.rollout=$ROLLOUT_GPU_MAP"
-    "+cluster.component_placement.env=$ENV_GPU_MAP"
   )
+fi
+
+if [[ -n "$LORA_PATH" ]]; then
+  if [[ ! -d "$LORA_PATH" ]]; then
+    echo "ERROR: LORA_PATH does not exist or is not a directory: $LORA_PATH"
+    exit 1
+  fi
+  CMD+=("+actor.model.lora_path=$LORA_PATH")
 fi
 
 echo "Running training command:"
