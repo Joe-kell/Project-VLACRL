@@ -198,6 +198,8 @@ class EnvWorker(Worker):
             raw_chunk_actions=chunk_actions,
             num_action_chunks=self.cfg.actor.model.num_action_chunks,
             action_dim=self.cfg.actor.model.action_dim,
+            model_name=self.cfg.actor.model.get("model_name", None),
+            log_action_stats=self.cfg.actor.model.get("log_action_stats", False),
         )
         env_info_list = {}
 
@@ -238,6 +240,8 @@ class EnvWorker(Worker):
             raw_chunk_actions=raw_actions,
             num_action_chunks=self.cfg.actor.model.num_action_chunks,
             action_dim=self.cfg.actor.model.action_dim,
+            model_name=self.cfg.actor.model.get("model_name", None),
+            log_action_stats=self.cfg.actor.model.get("log_action_stats", False),
         )
         env_info_list = {}
 
@@ -254,7 +258,11 @@ class EnvWorker(Worker):
                 ].cpu()
 
         env_batch = create_env_batch(
-            obs=extracted_obs, rews=None, dones=None, infos=infos, meta=env_info_list
+            obs=extracted_obs,
+            rews=None,
+            dones=chunk_dones,
+            infos=infos,
+            meta=env_info_list,
         )
         return env_batch
 

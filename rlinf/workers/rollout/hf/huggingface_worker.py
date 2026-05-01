@@ -259,8 +259,8 @@ class MultiStepRolloutWorker(Worker):
             steps=all_steps,
             stage_ids=all_stage_ids,
             rollout_epochs=all_epochs,
-            vocab_size=self.hf_model.vocab_size,
-            n_action_bins=self.hf_model.config.n_action_bins,
+            vocab_size=getattr(self.hf_model, "vocab_size", -1),
+            n_action_bins=getattr(getattr(self.hf_model, "config", None), "n_action_bins", -1),
             action_dim=self.hf_model.action_dim,
             num_action_chunks=self.hf_model.num_action_chunks,
         )
@@ -295,6 +295,10 @@ class MultiStepRolloutWorker(Worker):
         # Note: currently this is not correct for chunk-size>1 with partial reset
         if env_batch["dones"].any() and self.cfg.env.train.auto_reset:
             if self.cfg.algorithm.require_values:
+                if self.cfg.actor.model.model_name == "smolvla":
+                    # Current SmolVLA online path is GRPO-oriented and does not use
+                    # bootstrap values here.
+                    return
                 dones = env_batch["dones"]
                 # if self.require_values:
                 final_obs = env_batch["infos"]["final_observation"]
@@ -319,6 +323,7 @@ class MultiStepRolloutWorker(Worker):
                 )
 
     async def generate(self, global_step=0):
+        is_smolvla = self.cfg.actor.model.model_name == "smolvla"
         if self.cfg.rollout.get("enable_offload", False):
             self.reload_model()
         self.buffer_list = []
@@ -334,6 +339,97 @@ class MultiStepRolloutWorker(Worker):
                 for i in range(self.stage_num):
                     env_batch = await self.recv_env_batch()
                     self.update_env_batch(i, env_batch)
+                    if is_smolvla:
+                        policy_batch = self.hf_model.prepare_policy_batch(env_batch["obs"])
+                        (
+                            chunk_actions,
+                            chunk_action_token,
+                            chunk_logprobs,
+                            chunk_values,
+                        ) = self.hf_model.rollout_train_step(policy_batch)
+                        await self.send_chunk_actions(chunk_actions)
+
+                        # Log actions and sampled action tensors for debugging.
+                        self.log_actions_and_tokens(
+                            chunk_actions, chunk_action_token, step, i, rollout_epoch
+                        )
+
+                        packed_policy_batch = self.hf_model.pack_policy_batch_for_replay(
+                            policy_batch
+                        )
+                        for key, value in packed_policy_batch.items():
+                            self.buffer_list[i][key].append(value.cpu().contiguous())
+
+                        batch_size = chunk_action_token.shape[0]
+                        self.buffer_list[i]["input_ids"].append(
+                            torch.zeros(batch_size, 1, dtype=torch.long)
+                        )
+                        self.buffer_list[i]["pixel_values"].append(
+                            torch.zeros(batch_size, 1, dtype=torch.float32)
+                        )
+                        self.buffer_list[i]["attention_mask"].append(
+                            torch.ones(batch_size, 1, dtype=torch.bool)
+                        )
+                        self.buffer_list[i]["action_tokens"].append(
+                            chunk_action_token.cpu().contiguous()
+                        )
+                        self.buffer_list[i]["prev_logprobs"].append(
+                            chunk_logprobs.cpu().contiguous()
+                        )
+                        self.buffer_list[i]["prev_values"].append(
+                            chunk_values.cpu().contiguous()
+                        )
+                    else:
+                        processed_obs = prepare_observations(
+                            simulator_type=self.cfg.env.train.simulator_type,
+                            model_name=self.cfg.actor.model.model_name,
+                            raw_obs=env_batch["obs"],
+                            use_proprio=self.use_proprio,
+                            max_length=self.hf_model.max_prompt_length,
+                            processor=self.input_processor,
+                            precision=self.precision,
+                        )
+                        chunk_actions, chunk_action_token, chunk_logprobs, chunk_values = (
+                            self.predict(processed_obs)
+                        )
+                        await self.send_chunk_actions(chunk_actions)
+
+                        # Log actions and tokens for debugging
+                        self.log_actions_and_tokens(
+                            chunk_actions, chunk_action_token, step, i, rollout_epoch
+                        )
+
+                        self.buffer_list[i]["input_ids"].append(
+                            processed_obs["input_ids"].cpu().contiguous()
+                        )
+                        self.buffer_list[i]["pixel_values"].append(
+                            processed_obs["pixel_values"].cpu().contiguous()
+                        )
+                        self.buffer_list[i]["attention_mask"].append(
+                            processed_obs["attention_mask"].bool().cpu().contiguous()
+                        )
+                        self.buffer_list[i]["action_tokens"].append(
+                            chunk_action_token.cpu().contiguous()
+                        )
+                        self.buffer_list[i]["prev_logprobs"].append(
+                            chunk_logprobs.cpu().contiguous()
+                        )
+                        self.buffer_list[i]["prev_values"].append(
+                            chunk_values.cpu().contiguous()
+                        )
+
+            for i in range(self.stage_num):
+                env_batch = await self.recv_env_batch()
+                self.update_env_batch(i, env_batch)
+                if is_smolvla:
+                    batch_size = len(env_batch["obs"]["task_descriptions"])
+                    final_chunk_values = torch.zeros(
+                        batch_size,
+                        self.hf_model.num_action_chunks,
+                        1,
+                        dtype=torch.float32,
+                    )
+                else:
                     processed_obs = prepare_observations(
                         simulator_type=self.cfg.env.train.simulator_type,
                         model_name=self.cfg.actor.model.model_name,
@@ -343,48 +439,7 @@ class MultiStepRolloutWorker(Worker):
                         processor=self.input_processor,
                         precision=self.precision,
                     )
-                    chunk_actions, chunk_action_token, chunk_logprobs, chunk_values = (
-                        self.predict(processed_obs)
-                    )
-                    await self.send_chunk_actions(chunk_actions)
-
-                    # Log actions and tokens for debugging
-                    self.log_actions_and_tokens(
-                        chunk_actions, chunk_action_token, step, i, rollout_epoch
-                    )
-
-                    self.buffer_list[i]["input_ids"].append(
-                        processed_obs["input_ids"].cpu().contiguous()
-                    )
-                    self.buffer_list[i]["pixel_values"].append(
-                        processed_obs["pixel_values"].cpu().contiguous()
-                    )
-                    self.buffer_list[i]["attention_mask"].append(
-                        processed_obs["attention_mask"].bool().cpu().contiguous()
-                    )
-                    self.buffer_list[i]["action_tokens"].append(
-                        chunk_action_token.cpu().contiguous()
-                    )
-                    self.buffer_list[i]["prev_logprobs"].append(
-                        chunk_logprobs.cpu().contiguous()
-                    )
-                    self.buffer_list[i]["prev_values"].append(
-                        chunk_values.cpu().contiguous()
-                    )
-
-            for i in range(self.stage_num):
-                env_batch = await self.recv_env_batch()
-                self.update_env_batch(i, env_batch)
-                processed_obs = prepare_observations(
-                    simulator_type=self.cfg.env.train.simulator_type,
-                    model_name=self.cfg.actor.model.model_name,
-                    raw_obs=env_batch["obs"],
-                    use_proprio=self.use_proprio,
-                    max_length=self.hf_model.max_prompt_length,
-                    processor=self.input_processor,
-                    precision=self.precision,
-                )
-                _, _, _, final_chunk_values = self.predict(processed_obs)
+                    _, _, _, final_chunk_values = self.predict(processed_obs)
                 self.buffer_list[i]["prev_values"].append(
                     final_chunk_values.cpu().contiguous()
                 )
@@ -420,19 +475,26 @@ class MultiStepRolloutWorker(Worker):
         ):
             for i in range(self.stage_num):
                 env_batch = await self.recv_env_batch()
-                processed_obs = prepare_observations(
-                    simulator_type=self.cfg.env.eval.simulator_type,
-                    model_name=self.cfg.actor.model.model_name,
-                    raw_obs=env_batch["obs"],
-                    use_proprio=self.use_proprio,
-                    max_length=self.hf_model.max_prompt_length,
-                    processor=self.input_processor,
-                    precision=self.precision,
-                )
-                chunk_actions, _, _, _ = self.predict(
-                    processed_obs,
-                    mode="eval",
-                )
+                if self.cfg.actor.model.model_name == "smolvla":
+                    chunk_actions = self.hf_model.predict_action_step_batch(
+                        raw_obs=env_batch["obs"],
+                        done_mask=env_batch.get("dones", None),
+                        mode="eval",
+                    )
+                else:
+                    processed_obs = prepare_observations(
+                        simulator_type=self.cfg.env.eval.simulator_type,
+                        model_name=self.cfg.actor.model.model_name,
+                        raw_obs=env_batch["obs"],
+                        use_proprio=self.use_proprio,
+                        max_length=self.hf_model.max_prompt_length,
+                        processor=self.input_processor,
+                        precision=self.precision,
+                    )
+                    chunk_actions, _, _, _ = self.predict(
+                        processed_obs,
+                        mode="eval",
+                    )
                 await self.send_chunk_actions(chunk_actions)
 
                 if "meta" in env_batch:

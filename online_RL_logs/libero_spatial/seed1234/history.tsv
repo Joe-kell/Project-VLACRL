@@ -1,0 +1,4 @@
+timestamp_utc	status	stage	task_id	job_id	detail
+2026-04-27T13:21:14Z	retry	task_chain	0	3436899	exit_code=127 retry_count=1
+2026-04-27T13:21:26Z	retry	task_chain	0	3436900	exit_code=127 retry_count=2
+2026-04-27T13:21:31Z	retry	task_chain	0	3436901	exit_code=127 retry_count=3

@@ -28,6 +28,106 @@ from transformers import (
 from rlinf.config import torch_dtype_from_precision
 
 
+def _normalize_lora_component_names(value):
+    if value is None:
+        return ["all"]
+    if isinstance(value, str):
+        return [value.strip().lower()]
+    return [str(v).strip().lower() for v in value]
+
+
+def _get_default_lora_targets_for_model(model_name: str):
+    # Keep OpenVLA defaults unchanged for backward compatibility.
+    if model_name in {"openvla", "openvla_oft"}:
+        return [
+            "proj",
+            "qkv",
+            "fc1",
+            "fc2",  # vision
+            "q",
+            "kv",
+            "fc3",  # projector
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "lm_head",  # llm
+        ]
+    if model_name == "smolvla":
+        # SmolVLA/SmolVLM-style defaults.
+        return [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "fc1",
+            "fc2",
+        ]
+    return []
+
+
+def _get_component_target_map(model_name: str):
+    if model_name in {"openvla", "openvla_oft"}:
+        return {
+            "vision": ["proj", "qkv", "fc1", "fc2"],
+            "projector": ["q", "kv", "fc3"],
+            "llm": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+            "lm_head": ["lm_head"],
+        }
+    if model_name == "smolvla":
+        return {
+            "vision": ["fc1", "fc2"],
+            "llm": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+        }
+    return {}
+
+
+def _resolve_lora_target_modules(cfg):
+    explicit_targets = getattr(cfg, "lora_target_modules", None)
+    if explicit_targets:
+        return list(explicit_targets)
+
+    component_names = _normalize_lora_component_names(
+        getattr(cfg, "lora_components", None)
+    )
+    component_map = _get_component_target_map(cfg.model_name)
+    if not component_map or component_names == ["all"]:
+        return _get_default_lora_targets_for_model(cfg.model_name)
+
+    targets = []
+    for component in component_names:
+        if component not in component_map:
+            raise ValueError(
+                f"Unknown LoRA component '{component}' for model '{cfg.model_name}'. "
+                f"Valid components: {sorted(component_map.keys()) + ['all']}"
+            )
+        targets.extend(component_map[component])
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(targets))
+
+
 def _apply_lora_scale_if_present(model, lora_scale: float):
     """
     Apply a global multiplier to LoRA contribution.
@@ -79,6 +179,9 @@ def _apply_lora_scale_if_present(model, lora_scale: float):
 
 
 def get_model_config_and_processor(cfg: DictConfig):
+    if cfg.model.model_name == "smolvla":
+        # SmolVLA carries its LeRobot pre/post-processing with the checkpoint.
+        return None, None
     if cfg.model.model_name == "openvla":
         from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 
@@ -157,7 +260,26 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
     print(f"======================")
 
     torch_dtype = torch_dtype_from_precision(cfg.precision)
-    if cfg.model_name == "openvla":
+    smolvla_state_dict_path = None
+    if cfg.model_name == "smolvla":
+        from .embodiment.smolvla_action_model import SmolVLAForEvalActionPrediction
+
+        smolvla_model_path = model_path
+        if os.path.isfile(model_path):
+            smolvla_state_dict_path = model_path
+            smolvla_model_path = getattr(cfg, "base_policy_path", None)
+            if smolvla_model_path is None:
+                raise ValueError(
+                    "SmolVLA checkpoint_load_path points to a file, but no "
+                    "base policy path was provided. Set actor.model.base_policy_path "
+                    "to a LeRobot pretrained_model directory."
+                )
+
+        model = SmolVLAForEvalActionPrediction.from_pretrained_crl(
+            model_path=smolvla_model_path,
+            cfg=cfg,
+        )
+    elif cfg.model_name == "openvla":
         from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 
         actor_model_config = OpenVLAConfig.from_pretrained(
@@ -407,14 +529,10 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
                 print(f"  Creating new trainable LoRA adapter on top of merged model...")
                 lora_config = LoraConfig(
                     r=cfg.lora_rank,
-                    lora_alpha=cfg.lora_rank,
-                    lora_dropout=0.0,
-                    target_modules=[
-                        "proj", "qkv", "fc1", "fc2", "q", "kv", "fc3",
-                        "q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj", "lm_head",
-                    ],
-                    init_lora_weights="gaussian",
+                    lora_alpha=getattr(cfg, "lora_alpha", cfg.lora_rank),
+                    lora_dropout=getattr(cfg, "lora_dropout", 0.0),
+                    target_modules=_resolve_lora_target_modules(cfg),
+                    init_lora_weights=getattr(cfg, "lora_init", "gaussian"),
                 )
                 model = get_peft_model(model, lora_config)
                 print(f"  ✓ New trainable LoRA adapter created (only this adapter will be updated during training)")
@@ -426,26 +544,10 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
             # Create new LoRA adapter (for new task training)
             lora_config = LoraConfig(
                 r=cfg.lora_rank,
-                lora_alpha=cfg.lora_rank,
-                lora_dropout=0.0,
-                target_modules=[
-                    "proj",
-                    "qkv",
-                    "fc1",
-                    "fc2",  # vision
-                    "q",
-                    "kv",
-                    "fc3",  # project
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                    "lm_head",  # llm
-                ],
-                init_lora_weights="gaussian",
+                lora_alpha=getattr(cfg, "lora_alpha", cfg.lora_rank),
+                lora_dropout=getattr(cfg, "lora_dropout", 0.0),
+                target_modules=_resolve_lora_target_modules(cfg),
+                init_lora_weights=getattr(cfg, "lora_init", "gaussian"),
             )
             model = get_peft_model(model, lora_config)
 
@@ -484,4 +586,11 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
         print(f"Missing keys (likely value head): {missing}")
         print(f"Unexpected keys: {unexpected}")
         print(f"CHECKPOINT LOADED SUCCESSFULLY (critic reinitialized)")
+    elif smolvla_state_dict_path is not None:
+        print(f"LOADING SmolVLA state_dict checkpoint from: {smolvla_state_dict_path}")
+        model_dict = torch.load(smolvla_state_dict_path, map_location="cpu")
+        missing, unexpected = model.load_state_dict(model_dict, strict=False)
+        print(f"SmolVLA checkpoint missing keys: {missing}")
+        print(f"SmolVLA checkpoint unexpected keys: {unexpected}")
+        print("SmolVLA state_dict checkpoint loaded.")
     return model

@@ -58,7 +58,21 @@ def prepare_actions_for_maniskill(
 
 def prepare_actions_for_libero(
     raw_chunk_actions,
+    model_name: str | None = None,
+    log_action_stats: bool = False,
 ) -> torch.Tensor:
+    if model_name == "smolvla":
+        chunk_actions = np.asarray(raw_chunk_actions, dtype=np.float32).copy()
+        if log_action_stats:
+            gripper = chunk_actions[..., -1]
+            print(
+                "[SmolVLA] native LIBERO action stats at CRL env adapter: "
+                f"shape={chunk_actions.shape}, min={chunk_actions.min():.4f}, "
+                f"max={chunk_actions.max():.4f}, gripper_min={gripper.min():.4f}, "
+                f"gripper_max={gripper.max():.4f}"
+            )
+        return torch.from_numpy(chunk_actions).cuda()
+
     chunk_actions = raw_chunk_actions.copy()
     chunk_actions[..., -1] = 2 * chunk_actions[..., -1] - 1
     chunk_actions[..., -1] = np.sign(chunk_actions[..., -1]) * -1.0
@@ -74,10 +88,14 @@ def prepare_actions(
     action_dim,
     action_scale: float = 1.0,
     policy: str = "widowx_bridge",
+    model_name: str | None = None,
+    log_action_stats: bool = False,
 ) -> torch.Tensor:
     if simulator_type == "libero":
         chunk_actions = prepare_actions_for_libero(
             raw_chunk_actions=raw_chunk_actions,
+            model_name=model_name,
+            log_action_stats=log_action_stats,
         )
     elif simulator_type == "maniskill":
         chunk_actions = prepare_actions_for_maniskill(

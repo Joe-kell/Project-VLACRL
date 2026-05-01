@@ -712,6 +712,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             use_ref_logits_bc = self.cfg.algorithm.get("use_reference_logits_bc", False)
 
             is_cnn = self.cfg.actor.model.get("model_name") == "simple_cnn"
+            is_smolvla = self.cfg.actor.model.get("model_name") == "smolvla"
+            if is_smolvla and self.use_experience_replay:
+                raise NotImplementedError(
+                    "SmolVLA online RL currently does not support BC replay mixing."
+                )
 
             for data_idx, data in enumerate(train_micro_batch):
                 for k, v in data.items():
@@ -731,6 +736,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         action_tokens=data["action_tokens"],
                     )
                     # No BC batch for CNN
+                    bc_batch = None
+                    return_bc_logits = False
+                elif is_smolvla:
+                    policy_batch = self.model.extract_policy_batch_from_replay(data)
+                    output_dict = self.model(
+                        forward_type="actor_replay",
+                        policy_batch=policy_batch,
+                        sampled_policy_actions=data["action_tokens"],
+                    )
                     bc_batch = None
                     return_bc_logits = False
                 else:

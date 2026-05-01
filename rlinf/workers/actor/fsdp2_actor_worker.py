@@ -519,6 +519,11 @@ class EmbodiedFSDP2Actor(FSDP2ModelManager, Worker):
 
             self.optimizer.zero_grad()
             use_ref_logits_bc = self.cfg.algorithm.get("use_reference_logits_bc", False)
+            is_smolvla = self.cfg.actor.model.get("model_name") == "smolvla"
+            if is_smolvla and self.use_experience_replay:
+                raise NotImplementedError(
+                    "SmolVLA online RL currently does not support BC replay mixing."
+                )
 
             for data_idx, data in enumerate(train_micro_batch):
                 for k, v in data.items():
@@ -527,44 +532,54 @@ class EmbodiedFSDP2Actor(FSDP2ModelManager, Worker):
                 data = self.model.preprocess_for_train(data)
                 action_token_len = self.model.action_dim * self.model.num_action_chunks
 
-                logits_processor_args = {
-                    "action_tokens": data["action_tokens"],
-                    "vocab_size": self.model.vocab_size,
-                    "n_action_bins": self.model.config.n_action_bins,
-                }
-
-                sampling_params = OmegaConf.to_container(
-                    self.cfg.algorithm.sampling_params, resolve=True
-                )
-
-                bc_batch = None
-                if self.use_experience_replay:
-                    bc_batch = next(self.sft_iterator)
-                    for k, v in bc_batch.items():
-                        bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-
-                return_bc_logits = use_ref_logits_bc and bc_batch is not None
-                forward_result = actor_forward(
-                    self.model,
-                    rl_batch=data,
-                    bc_batch=bc_batch,
-                    action_token_len=action_token_len,
-                    value_model=True
-                    if self.cfg.algorithm.adv_type == "embodied_gae"
-                    else False,
-                    value_head_mode=self.cfg.actor.model.get("vh_mode", None),
-                    temperature=self.cfg.algorithm.sampling_params.temperature_train,
-                    top_k=self.cfg.algorithm.sampling_params.top_k,
-                    logits_processor_args=logits_processor_args,
-                    do_sample=not sampling_params["use_greedy"],
-                    return_bc_logits=return_bc_logits,
-                    logits_type=self.logits_type,
-                )
-
-                if return_bc_logits:
-                    output_dict, current_bc_logits = forward_result
+                if is_smolvla:
+                    policy_batch = self.model.extract_policy_batch_from_replay(data)
+                    output_dict = self.model(
+                        forward_type="actor_replay",
+                        policy_batch=policy_batch,
+                        sampled_policy_actions=data["action_tokens"],
+                    )
+                    bc_batch = None
+                    return_bc_logits = False
                 else:
-                    output_dict = forward_result
+                    logits_processor_args = {
+                        "action_tokens": data["action_tokens"],
+                        "vocab_size": self.model.vocab_size,
+                        "n_action_bins": self.model.config.n_action_bins,
+                    }
+
+                    sampling_params = OmegaConf.to_container(
+                        self.cfg.algorithm.sampling_params, resolve=True
+                    )
+
+                    bc_batch = None
+                    if self.use_experience_replay:
+                        bc_batch = next(self.sft_iterator)
+                        for k, v in bc_batch.items():
+                            bc_batch[k] = v.to(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+
+                    return_bc_logits = use_ref_logits_bc and bc_batch is not None
+                    forward_result = actor_forward(
+                        self.model,
+                        rl_batch=data,
+                        bc_batch=bc_batch,
+                        action_token_len=action_token_len,
+                        value_model=True
+                        if self.cfg.algorithm.adv_type == "embodied_gae"
+                        else False,
+                        value_head_mode=self.cfg.actor.model.get("vh_mode", None),
+                        temperature=self.cfg.algorithm.sampling_params.temperature_train,
+                        top_k=self.cfg.algorithm.sampling_params.top_k,
+                        logits_processor_args=logits_processor_args,
+                        do_sample=not sampling_params["use_greedy"],
+                        return_bc_logits=return_bc_logits,
+                        logits_type=self.logits_type,
+                    )
+
+                    if return_bc_logits:
+                        output_dict, current_bc_logits = forward_result
+                    else:
+                        output_dict = forward_result
 
                 kwargs = {
                     "loss_type": self.cfg.algorithm.loss_type,

@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=vlacrl_controller
+#SBATCH --output=/home/s2758621/Continual_VLA_RL/logs/test-controller-%j.out
+#SBATCH --error=/home/s2758621/Continual_VLA_RL/logs/test-controller-%j.err
+#SBATCH --partition=ICF-Free
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=45
+#SBATCH --mem=300G
+#SBATCH --gres=gpu:a40:1
+
+### Eval a LeRobot-format SmolVLA checkpoint through the CRL LIBERO pipeline.
+###
+### Usage:
+###   sbatch examples/crl_experiment/eval_smolvla_embodiment.sh
+###   sbatch examples/crl_experiment/eval_smolvla_embodiment.sh /path/to/pretrained_model
+###   SMOKE=true sbatch examples/crl_experiment/eval_smolvla_embodiment.sh
+###
+### Accepted checkpoint inputs:
+###   - .../pretrained_model
+###   - .../checkpoints/last/pretrained_model
+###   - a run dir containing checkpoints/last/pretrained_model
+
+set -euo pipefail
+
+# IMPORTANT:
+# Slurm may copy this script into /var/spool before running it.
+# Therefore, do not infer CRL_ROOT from BASH_SOURCE under sbatch.
+CRL_ROOT="${CRL_ROOT:-/home/s2758621/Continual_VLA_RL}"
+SCRIPT_DIR="$CRL_ROOT/examples/crl_experiment"
+
+OCTO_ROOT="${OCTO_ROOT:-/home/s2758621/Octo_RL}"
+LEROBOT_SRC="${LEROBOT_SRC:-$OCTO_ROOT/lerobot/src}"
+LIBERO_SRC="${LIBERO_SRC:-$CRL_ROOT/LIBERO/libero}"
+VLA_LIBERO_ROOT="${VLA_LIBERO_ROOT:-$OCTO_ROOT/scripts/smolvla/vla-libero}"
+
+# Use this conda environment for the eval.
+CONDA_ENV="${CONDA_ENV:-vlacrl_libplus_smolvla}"
+
+DEFAULT_SMOLVLA_POLICY_PATH="/home/s2758621/Octo_RL/checkpoints/smolvla_libero_object_20demo/job_3441070/checkpoints/last/pretrained_model"
+
+export PYTHONPATH="$VLA_LIBERO_ROOT:$LEROBOT_SRC:$LIBERO_SRC:$OCTO_ROOT:$CRL_ROOT:${PYTHONPATH:-}"
+export LIBERO_REPO_PATH="${LIBERO_REPO_PATH:-$LIBERO_SRC}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-$HF_HUB_OFFLINE}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export HF_HOME="${HF_HOME:-$OCTO_ROOT/hf_cache}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-$HF_HOME/lerobot}"
+
+# Ray creates Unix-domain sockets under its temp directory. The repo-local
+# default path is too long on this machine once Ray appends session/socket names.
+RAY_TMP_BASE_DEFAULT="/tmp/r_${USER:-u}_${SLURM_JOB_ID:-smolvla}"
+export RAY_TMPDIR="${RAY_TMPDIR:-$RAY_TMP_BASE_DEFAULT}"
+export TMPDIR="$RAY_TMPDIR"
+export TMP="$RAY_TMPDIR"
+export TEMP="$RAY_TMPDIR"
+
+mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE" "$HF_LEROBOT_HOME" "$RAY_TMPDIR"
+chmod 700 "$RAY_TMPDIR" 2>/dev/null || true
+mkdir -p /home/s2758621/Continual_VLA_RL/logs
+
+# Always activate the intended conda environment inside Slurm.
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate "$CONDA_ENV"
+
+echo "  CONDA_ENV=$CONDA_ENV"
+echo "  CONDA_PREFIX=${CONDA_PREFIX:-<none>}"
+echo "  PYTHON=$(which python)"
+echo "  RAY_TMPDIR=$RAY_TMPDIR"
+python -c "import sys; print('  PYTHON_EXECUTABLE=' + sys.executable)"
+python - <<'PY'
+import sys
+
+errors = []
+for module_name in ("ray", "omegaconf", "hydra"):
+    try:
+        __import__(module_name)
+    except Exception as exc:
+        errors.append(f"{module_name}: {type(exc).__name__}: {exc}")
+
+try:
+    import transformers
+
+    print(f"  TRANSFORMERS={transformers.__version__} ({transformers.__file__})")
+    if not hasattr(transformers, "AutoModelForImageTextToText"):
+        errors.append(
+            "transformers lacks AutoModelForImageTextToText, which SmolVLA needs. "
+            "Do not use the OpenVLA forked Transformers env for SmolVLA eval."
+        )
+except Exception as exc:
+    errors.append(f"transformers: {type(exc).__name__}: {exc}")
+
+if errors:
+    print("ERROR: active conda env is not SmolVLA+CRL compatible:", file=sys.stderr)
+    for err in errors:
+        print(f"  - {err}", file=sys.stderr)
+    print(
+        "Use a combined env, e.g. clone vlacrl_libplus and install LeRobot/SmolVLA "
+        "Transformers support, or add Ray/CRL deps to octo_lerobot_env.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+
+POLICY_INPUT="${1:-${SMOLVLA_POLICY_PATH:-$DEFAULT_SMOLVLA_POLICY_PATH}}"
+
+if [ -z "$POLICY_INPUT" ]; then
+    echo "ERROR: pass a SmolVLA checkpoint path, or set SMOLVLA_POLICY_PATH."
+    exit 1
+fi
+
+shift || true
+
+resolve_policy_path() {
+    local input="${1%/}"
+    local candidates=(
+        "$input"
+        "$input/pretrained_model"
+        "$input/checkpoints/last/pretrained_model"
+        "$input/last/pretrained_model"
+    )
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [ -f "$candidate/config.json" ] && [ -f "$candidate/model.safetensors" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    echo "ERROR: could not resolve LeRobot SmolVLA pretrained_model directory." >&2
+    echo "Checked:" >&2
+    for candidate in "${candidates[@]}"; do
+        echo "  $candidate" >&2
+    done
+    return 1
+}
+
+export SMOLVLA_POLICY_PATH="$(resolve_policy_path "$POLICY_INPUT")"
+
+CONFIG_NAME="${CONFIG_NAME:-crl_experiment/libero_object_grpo_smolvla_eval_object}"
+BENCHMARK="${BENCHMARK:-libero_object}"
+NUM_ACTION_CHUNKS="${NUM_ACTION_CHUNKS:-8}"
+EMPTY_CAMERAS="${EMPTY_CAMERAS:-1}"
+LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-True}"
+USE_AMP="${USE_AMP:-False}"
+ZERO_ACTION_NOISE="${ZERO_ACTION_NOISE:-False}"
+USER_LOG_ACTION_STATS="${LOG_ACTION_STATS:-}"
+LOG_ACTION_STATS="${LOG_ACTION_STATS:-False}"
+MAX_PARALLEL_TASKS="${MAX_PARALLEL_TASKS:-1}"
+EVAL_NUM_ENVS="${EVAL_NUM_ENVS:-10}"
+EVAL_ROLLOUT_EPOCH="${EVAL_ROLLOUT_EPOCH:-40}"
+FIXED_TASK_IDS="${FIXED_TASK_IDS:-}"
+SMOKE="${SMOKE:-false}"
+
+if [ "$SMOKE" = "true" ]; then
+    EVAL_NUM_ENVS="${SMOKE_EVAL_NUM_ENVS:-1}"
+    EVAL_ROLLOUT_EPOCH="${SMOKE_EVAL_ROLLOUT_EPOCH:-1}"
+    FIXED_TASK_IDS="${FIXED_TASK_IDS:-[0]}"
+    if [ -z "$USER_LOG_ACTION_STATS" ]; then
+        LOG_ACTION_STATS=True
+    fi
+fi
+
+echo "Running CRL SmolVLA eval"
+echo "  SLURM_JOB_ID=${SLURM_JOB_ID:-<not running under Slurm>}"
+echo "  CRL_ROOT=$CRL_ROOT"
+echo "  SMOLVLA_POLICY_PATH=$SMOLVLA_POLICY_PATH"
+echo "  CONFIG_NAME=$CONFIG_NAME"
+echo "  BENCHMARK=$BENCHMARK"
+echo "  NUM_ACTION_CHUNKS=$NUM_ACTION_CHUNKS"
+echo "  EMPTY_CAMERAS=$EMPTY_CAMERAS"
+echo "  LOCAL_FILES_ONLY=$LOCAL_FILES_ONLY HF_HUB_OFFLINE=$HF_HUB_OFFLINE"
+echo "  USE_AMP=$USE_AMP ZERO_ACTION_NOISE=$ZERO_ACTION_NOISE"
+echo "  EVAL_NUM_ENVS=$EVAL_NUM_ENVS EVAL_ROLLOUT_EPOCH=$EVAL_ROLLOUT_EPOCH"
+echo "  FIXED_TASK_IDS=${FIXED_TASK_IDS:-<all>}"
+echo "  LEROBOT_SRC=$LEROBOT_SRC"
+echo "  LIBERO_REPO_PATH=$LIBERO_REPO_PATH"
+
+HYDRA_OVERRIDES=(
+    "rollout.model_dir=$SMOLVLA_POLICY_PATH"
+    "actor.checkpoint_load_path=$SMOLVLA_POLICY_PATH"
+    "actor.model.model_name=smolvla"
+    "actor.model.is_lora=False"
+    "actor.model.libero_task=$BENCHMARK"
+    "actor.model.num_action_chunks=$NUM_ACTION_CHUNKS"
+    "actor.model.empty_cameras=$EMPTY_CAMERAS"
+    "actor.model.local_files_only=$LOCAL_FILES_ONLY"
+    "actor.model.use_amp=$USE_AMP"
+    "actor.model.zero_action_noise=$ZERO_ACTION_NOISE"
+    "actor.model.log_action_stats=$LOG_ACTION_STATS"
+    "actor.model.max_parallel_tasks=$MAX_PARALLEL_TASKS"
+    "env.eval.num_envs=$EVAL_NUM_ENVS"
+    "algorithm.eval_rollout_epoch=$EVAL_ROLLOUT_EPOCH"
+    "actor.tokenizer.tokenizer_model=$SMOLVLA_POLICY_PATH"
+)
+
+if [ -n "$FIXED_TASK_IDS" ]; then
+    HYDRA_OVERRIDES+=("env.fixed_task_ids=$FIXED_TASK_IDS")
+fi
+
+if [ -n "${POLICY_N_ACTION_STEPS:-}" ]; then
+    HYDRA_OVERRIDES+=("actor.model.policy_n_action_steps=$POLICY_N_ACTION_STEPS")
+fi
+
+if [ -n "${EVAL_PER_TASK:-}" ]; then
+    HYDRA_OVERRIDES+=("env.eval.eval_per_task=$EVAL_PER_TASK")
+fi
+
+cd "$CRL_ROOT"
+
+bash "$CRL_ROOT/examples/embodiment/eval_embodiment.sh" \
+    "$CONFIG_NAME" \
+    "${HYDRA_OVERRIDES[@]}" \
+    "$@"
