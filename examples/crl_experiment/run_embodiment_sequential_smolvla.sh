@@ -1,9 +1,26 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#SBATCH --job-name=vlacrl_controller
+#SBATCH --output=/home/s2758621/Continual_VLA_RL/logs/test-controller-%j.out
+#SBATCH --error=/home/s2758621/Continual_VLA_RL/logs/test-controller-%j.err
+#SBATCH --partition=ICF-Free
+#SBATCH --nodelist=damnii08
+#SBATCH --time=24:00:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=40
+#SBATCH --mem=300G
+#SBATCH --gres=gpu:nvidia_geforce_rtx_2080_ti:8
+
 ### Usage: bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh TASK_ID_OR_RANGE [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
 ### Example (single task): bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh 5
 ### Example (task range): bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh "5,7"
 ### Example (resume): bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh 6 ./logs_smolvla/sequential_smolvla/task_5_seed1234/checkpoints/global_step_10/actor/model.pt 10
 ### Notes:
+###   - This file can now be submitted directly with `sbatch`.
+###   - To change GPU count/type for a run, edit the `#SBATCH --gres=...` line
+###     above or override it at submission time, e.g.
+###     `sbatch --gres=gpu:nvidia_l40s:2 run_embodiment_sequential_smolvla.sh 5`
+###   - The defaults below are tuned for 8x RTX 2080 Ti on damnii08:
+###       precision=fp16, attention=sdpa, micro_batch_size=1.
 ###   - This script chains full SmolVLA checkpoints via actor/model.pt (not LoRA adapter dirs).
 ###   - If you enable LoRA (`actor.model.is_lora=true`), use the existing LoRA sequential
 ###     driver script pattern (`run_embodiment_sequential.sh`) with +actor.model.lora_path.
@@ -21,6 +38,15 @@ EXPERIMENT_TYPE="sequential_smolvla"
 
 # Optional: base LeRobot SmolVLA policy path used when checkpoint_load_path points to model.pt.
 SMOLVLA_BASE_POLICY_PATH="${SMOLVLA_BASE_POLICY_PATH:-/home/s2758621/Octo_RL/checkpoints/smolvla_libero_object_20demo/job_3441070/checkpoints/last/pretrained_model}"
+
+# 2080 Ti-safe defaults. Override via environment if needed, e.g.
+#   SMOLVLA_PRECISION=fp32 SMOLVLA_ATTN_IMPL=eager sbatch ...
+SMOLVLA_PRECISION="${SMOLVLA_PRECISION:-fp16}"
+SMOLVLA_ATTN_IMPL="${SMOLVLA_ATTN_IMPL:-sdpa}"
+SMOLVLA_MICRO_BATCH_SIZE="${SMOLVLA_MICRO_BATCH_SIZE:-1}"
+SMOLVLA_GLOBAL_BATCH_SIZE="${SMOLVLA_GLOBAL_BATCH_SIZE:-512}"
+SMOLVLA_USE_AMP="${SMOLVLA_USE_AMP:-true}"
+SMOLVLA_GRADIENT_CHECKPOINTING="${SMOLVLA_GRADIENT_CHECKPOINTING:-true}"
 
 if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
     echo "ERROR: SEED must be a non-negative integer, got: $SEED"
@@ -54,13 +80,27 @@ mkdir -p "logs/${EXPERIMENT_TYPE}"
 echo "Start Time: $(date)"
 echo "Working Directory: $(pwd)"
 echo "SMOLVLA_BASE_POLICY_PATH: $SMOLVLA_BASE_POLICY_PATH"
+echo "SMOLVLA_PRECISION: $SMOLVLA_PRECISION"
+echo "SMOLVLA_ATTN_IMPL: $SMOLVLA_ATTN_IMPL"
+echo "SMOLVLA_MICRO_BATCH_SIZE: $SMOLVLA_MICRO_BATCH_SIZE"
+echo "SMOLVLA_GLOBAL_BATCH_SIZE: $SMOLVLA_GLOBAL_BATCH_SIZE"
+echo "SMOLVLA_USE_AMP: $SMOLVLA_USE_AMP"
+echo "SMOLVLA_GRADIENT_CHECKPOINTING: $SMOLVLA_GRADIENT_CHECKPOINTING"
 echo ""
 
-SCRIPT_DIR="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT=$(dirname $(dirname "$SCRIPT_DIR"))
+REPO_ROOT="${CONTINUAL_VLA_RL_ROOT:-/home/s2758621/Continual_VLA_RL}"
+if [ ! -d "$REPO_ROOT" ]; then
+    echo "ERROR: REPO_ROOT does not exist: $REPO_ROOT"
+    exit 1
+fi
 cd "$REPO_ROOT"
 
-source "examples/crl_experiment/common_functions.sh"
+COMMON_FUNCTIONS_SH="${REPO_ROOT}/examples/crl_experiment/common_functions.sh"
+if [ ! -f "$COMMON_FUNCTIONS_SH" ]; then
+    echo "ERROR: common_functions.sh not found: $COMMON_FUNCTIONS_SH"
+    exit 1
+fi
+source "$COMMON_FUNCTIONS_SH"
 CONFIG_TAG=$(extract_config_tag "$CONFIG_NAME")
 GLOBAL_STEP=$(get_default_global_step "$CONFIG_NAME")
 FIRST_TASK_ID=$(get_first_task_id "$CONFIG_NAME")
@@ -127,7 +167,7 @@ for TASK_ID in $(seq "$TASK_START" "$TASK_END"); do
         echo "  First task: training from base SmolVLA policy path in config"
     fi
 
-    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} actor.model.base_policy_path=${SMOLVLA_BASE_POLICY_PATH}"
+    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} actor.model.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.precision=${SMOLVLA_PRECISION} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING}"
 
     if [ -n "$CHECKPOINT_PATH" ]; then
         OVERRIDES="$OVERRIDES actor.checkpoint_load_path=${CHECKPOINT_PATH} rollout.model_dir=${CHECKPOINT_PATH}"
