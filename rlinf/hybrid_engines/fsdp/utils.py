@@ -88,6 +88,42 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     if config.get("disable", False):
         return None
 
+    is_smolvla_model = (
+        hasattr(module, "policy")
+        and hasattr(module.policy, "model")
+        and hasattr(module.policy.model, "vlm_with_expert")
+    )
+    if is_smolvla_model:
+        def uniform_direct_floating_param_dtype(target_module):
+            dtypes = {
+                param.dtype
+                for param in target_module.parameters(recurse=False)
+                if param.is_floating_point()
+            }
+            return len(dtypes) == 1, len(dtypes) > 0
+
+        vlm_with_expert = module.policy.model.vlm_with_expert
+        leaf_wrap_ids = set()
+
+        # SmolVLA deliberately mixes bf16 VLM weights with fp32 action/state and
+        # cross-attention heads. FSDP can only flatten tensors with a uniform
+        # dtype, so wrap direct-param leaves instead of large mixed containers.
+        for submodule in vlm_with_expert.modules():
+            is_uniform, has_params = uniform_direct_floating_param_dtype(submodule)
+            if is_uniform and has_params:
+                leaf_wrap_ids.add(id(submodule))
+
+        if not leaf_wrap_ids:
+            return None
+
+        def smolvla_wrap_policy(module, recurse, nonwrapped_numel):
+            del nonwrapped_numel
+            if recurse:
+                return True
+            return id(module) in leaf_wrap_ids
+
+        return smolvla_wrap_policy
+
     # Check if this is a VLA model by looking for language_model attribute
     is_vla_model = hasattr(module, "language_model")
 

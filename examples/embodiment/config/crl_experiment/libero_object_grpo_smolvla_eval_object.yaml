@@ -10,6 +10,9 @@ hydra:
   searchpath:
     - file://${oc.env:EMBODIED_PATH}/config/
 
+smolvla:
+  base_policy_path: "/home/s2758621/Continual_VLA_RL/model/smolvla/libero_object_20demo_base/pretrained_model"
+
 cluster:
   num_nodes: 1
   component_placement:
@@ -108,7 +111,7 @@ rollout:
     queue_size: 0
   mode: "colocate"
   generation_backend: "huggingface"
-  model_dir: "${oc.env:SMOLVLA_POLICY_PATH}"
+  model_dir: ${smolvla.base_policy_path}
   enable_offload: False
   pipeline_stage_num: 1
   random_action: False
@@ -120,7 +123,7 @@ actor:
     queue_name: "replay_buffer"
     queue_size: 0
   training_backend: "fsdp"
-  checkpoint_load_path: "${oc.env:SMOLVLA_POLICY_PATH}"
+  checkpoint_load_path: ${smolvla.base_policy_path}
   micro_batch_size: 32
   global_batch_size: 8192
   seed: 1234
@@ -170,7 +173,7 @@ actor:
     low_cpu_mem_usage: True
     trust_remote_code: True
     gradient_checkpointing: False
-    base_policy_path: "${oc.env:SMOLVLA_POLICY_PATH}"
+    base_policy_path: ${smolvla.base_policy_path}
 
   optim:
     lr: 2.0e-5
@@ -182,7 +185,7 @@ actor:
 
   tokenizer:
     tokenizer_type: "HuggingFaceTokenizer"
-    tokenizer_model: "${oc.env:SMOLVLA_POLICY_PATH}"
+    tokenizer_model: ${smolvla.base_policy_path}
     use_fast: False
     trust_remote_code: True
     padding_side: "right"

@@ -3,12 +3,11 @@
 #SBATCH --output=/home/s2758621/Continual_VLA_RL/logs/test-controller-%j.out
 #SBATCH --error=/home/s2758621/Continual_VLA_RL/logs/test-controller-%j.err
 #SBATCH --partition=ICF-Free
-#SBATCH --nodelist=damnii08
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=40
-#SBATCH --mem=300G
-#SBATCH --gres=gpu:nvidia_geforce_rtx_2080_ti:8
+#SBATCH --mem=400G
+#SBATCH --gres=gpu:nvidia_l40s:4
 
 ### Usage: bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh TASK_ID_OR_RANGE [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
 ### Example (single task): bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh 5
@@ -19,8 +18,9 @@
 ###   - To change GPU count/type for a run, edit the `#SBATCH --gres=...` line
 ###     above or override it at submission time, e.g.
 ###     `sbatch --gres=gpu:nvidia_l40s:2 run_embodiment_sequential_smolvla.sh 5`
-###   - The defaults below are tuned for 8x RTX 2080 Ti on damnii08:
-###       precision=fp16, attention=sdpa, micro_batch_size=1.
+###   - The launcher selects a hardware profile and applies matching Hydra overrides.
+###   - Override detection with `SMOLVLA_HW_PROFILE={rtx2080ti|a40|l40s}` if needed.
+###   - Precision is no longer overridden here; it comes from the Hydra config / model path.
 ###   - This script chains full SmolVLA checkpoints via actor/model.pt (not LoRA adapter dirs).
 ###   - If you enable LoRA (`actor.model.is_lora=true`), use the existing LoRA sequential
 ###     driver script pattern (`run_embodiment_sequential.sh`) with +actor.model.lora_path.
@@ -35,18 +35,64 @@ MAX_EPOCH=${3:-}
 CONFIG_NAME=${4:-crl_experiment/libero_object_grpo_smolvla_object}
 SEED=${5:-1234}
 EXPERIMENT_TYPE="sequential_smolvla"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-vlacrl_libplus_smolvla}"
+CONDA_BASE="${CONDA_BASE:-$HOME/miniconda3}"
 
 # Optional: base LeRobot SmolVLA policy path used when checkpoint_load_path points to model.pt.
-SMOLVLA_BASE_POLICY_PATH="${SMOLVLA_BASE_POLICY_PATH:-/home/s2758621/Octo_RL/checkpoints/smolvla_libero_object_20demo/job_3441070/checkpoints/last/pretrained_model}"
+SMOLVLA_BASE_POLICY_PATH="${SMOLVLA_BASE_POLICY_PATH:-/home/s2758621/Continual_VLA_RL/model/smolvla/libero_object_20demo_base/pretrained_model}"
 
-# 2080 Ti-safe defaults. Override via environment if needed, e.g.
-#   SMOLVLA_PRECISION=fp32 SMOLVLA_ATTN_IMPL=eager sbatch ...
-SMOLVLA_PRECISION="${SMOLVLA_PRECISION:-fp16}"
-SMOLVLA_ATTN_IMPL="${SMOLVLA_ATTN_IMPL:-sdpa}"
-SMOLVLA_MICRO_BATCH_SIZE="${SMOLVLA_MICRO_BATCH_SIZE:-1}"
-SMOLVLA_GLOBAL_BATCH_SIZE="${SMOLVLA_GLOBAL_BATCH_SIZE:-512}"
-SMOLVLA_USE_AMP="${SMOLVLA_USE_AMP:-true}"
-SMOLVLA_GRADIENT_CHECKPOINTING="${SMOLVLA_GRADIENT_CHECKPOINTING:-true}"
+detect_smolvla_hw_profile() {
+    local node_name="${SLURMD_NODENAME:-${HOSTNAME:-unknown}}"
+    case "$node_name" in
+        damnii*)
+            echo "rtx2080ti"
+            ;;
+        scotia*)
+            echo "l40s"
+            ;;
+        *)
+            echo "a40"
+            ;;
+    esac
+}
+
+SMOLVLA_HW_PROFILE="${SMOLVLA_HW_PROFILE:-$(detect_smolvla_hw_profile)}"
+
+case "$SMOLVLA_HW_PROFILE" in
+    rtx2080ti)
+        DEFAULT_SMOLVLA_ATTN_IMPL="sdpa"
+        DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="1"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="512"
+        DEFAULT_SMOLVLA_USE_AMP="true"
+        DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
+        ;;
+    a40)
+        DEFAULT_SMOLVLA_ATTN_IMPL="sdpa"
+        DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="1"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="512"
+        DEFAULT_SMOLVLA_USE_AMP="true"
+        DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
+        ;;
+    l40s)
+        DEFAULT_SMOLVLA_ATTN_IMPL="flash_attention_2"
+        DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="2"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="512"
+        DEFAULT_SMOLVLA_USE_AMP="true"
+        DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
+        ;;
+    *)
+        echo "ERROR: unsupported SMOLVLA_HW_PROFILE: $SMOLVLA_HW_PROFILE"
+        echo "Valid values: rtx2080ti, a40, l40s"
+        exit 1
+        ;;
+esac
+
+# Profile defaults can still be overridden explicitly via environment.
+SMOLVLA_ATTN_IMPL="${SMOLVLA_ATTN_IMPL:-$DEFAULT_SMOLVLA_ATTN_IMPL}"
+SMOLVLA_MICRO_BATCH_SIZE="${SMOLVLA_MICRO_BATCH_SIZE:-$DEFAULT_SMOLVLA_MICRO_BATCH_SIZE}"
+SMOLVLA_GLOBAL_BATCH_SIZE="${SMOLVLA_GLOBAL_BATCH_SIZE:-$DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE}"
+SMOLVLA_USE_AMP="${SMOLVLA_USE_AMP:-$DEFAULT_SMOLVLA_USE_AMP}"
+SMOLVLA_GRADIENT_CHECKPOINTING="${SMOLVLA_GRADIENT_CHECKPOINTING:-$DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING}"
 
 if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
     echo "ERROR: SEED must be a non-negative integer, got: $SEED"
@@ -79,13 +125,24 @@ fi
 mkdir -p "logs/${EXPERIMENT_TYPE}"
 echo "Start Time: $(date)"
 echo "Working Directory: $(pwd)"
+echo "SMOLVLA_HW_PROFILE: $SMOLVLA_HW_PROFILE"
+echo "SLURMD_NODENAME: ${SLURMD_NODENAME:-<unset>}"
 echo "SMOLVLA_BASE_POLICY_PATH: $SMOLVLA_BASE_POLICY_PATH"
-echo "SMOLVLA_PRECISION: $SMOLVLA_PRECISION"
 echo "SMOLVLA_ATTN_IMPL: $SMOLVLA_ATTN_IMPL"
 echo "SMOLVLA_MICRO_BATCH_SIZE: $SMOLVLA_MICRO_BATCH_SIZE"
 echo "SMOLVLA_GLOBAL_BATCH_SIZE: $SMOLVLA_GLOBAL_BATCH_SIZE"
 echo "SMOLVLA_USE_AMP: $SMOLVLA_USE_AMP"
 echo "SMOLVLA_GRADIENT_CHECKPOINTING: $SMOLVLA_GRADIENT_CHECKPOINTING"
+
+# Keep Ray's Unix socket paths short enough for AF_UNIX limits.
+RAY_TMP_BASE_DEFAULT="/tmp/r_${USER:-u}_${SLURM_JOB_ID:-smolvla}"
+export RAY_TMPDIR="${RAY_TMPDIR:-$RAY_TMP_BASE_DEFAULT}"
+export TMPDIR="$RAY_TMPDIR"
+export TMP="$RAY_TMPDIR"
+export TEMP="$RAY_TMPDIR"
+mkdir -p "$RAY_TMPDIR"
+chmod 700 "$RAY_TMPDIR" 2>/dev/null || true
+echo "RAY_TMPDIR: $RAY_TMPDIR"
 echo ""
 
 REPO_ROOT="${CONTINUAL_VLA_RL_ROOT:-/home/s2758621/Continual_VLA_RL}"
@@ -94,6 +151,31 @@ if [ ! -d "$REPO_ROOT" ]; then
     exit 1
 fi
 cd "$REPO_ROOT"
+
+if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+elif [[ -x "$CONDA_BASE/bin/activate" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONDA_BASE/bin/activate" "$CONDA_ENV_NAME"
+elif command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
+    conda activate "$CONDA_ENV_NAME"
+else
+    echo "ERROR: Could not find conda activation scripts."
+    exit 1
+fi
+
+echo "CONDA_ENV_NAME: $CONDA_ENV_NAME"
+python - <<'PY'
+import sys
+import yaml
+
+print(f"PYTHON_EXECUTABLE: {sys.executable}")
+print(f"PYyaml_VERSION: {yaml.__version__}")
+PY
+echo ""
 
 COMMON_FUNCTIONS_SH="${REPO_ROOT}/examples/crl_experiment/common_functions.sh"
 if [ ! -f "$COMMON_FUNCTIONS_SH" ]; then
@@ -167,7 +249,13 @@ for TASK_ID in $(seq "$TASK_START" "$TASK_END"); do
         echo "  First task: training from base SmolVLA policy path in config"
     fi
 
-    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} actor.model.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.precision=${SMOLVLA_PRECISION} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING}"
+    if [ ! -f "${SMOLVLA_BASE_POLICY_PATH}/config.json" ] || [ ! -f "${SMOLVLA_BASE_POLICY_PATH}/model.safetensors" ]; then
+        echo "ERROR: invalid SmolVLA base policy path: $SMOLVLA_BASE_POLICY_PATH"
+        OVERALL_EXIT_CODE=1
+        break
+    fi
+
+    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} smolvla.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING} env.train.num_images_in_input=2 env.eval.num_images_in_input=2"
 
     if [ -n "$CHECKPOINT_PATH" ]; then
         OVERRIDES="$OVERRIDES actor.checkpoint_load_path=${CHECKPOINT_PATH} rollout.model_dir=${CHECKPOINT_PATH}"

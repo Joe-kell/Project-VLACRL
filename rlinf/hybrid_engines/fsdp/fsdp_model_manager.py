@@ -88,14 +88,23 @@ class FSDPModelManager:
         # Use FSDP for all models (including simple_cnn with NO_SHARD).
         # FSDP is preferred over DDP because it forwards attribute access via __getattr__,
         # which is needed by the training loop (e.g., self.model.action_dim).
+        is_smolvla = self._cfg.model.get("model_name") == "smolvla"
         # Note: For CNN models, BatchNorm is frozen (eval mode) during training,
         # so buffers don't accumulate during backward pass. Keeping buffer_dtype
         # matching param_dtype avoids FSDP dtype mismatch errors.
-        mixed_precision = MixedPrecision(
-            param_dtype=self.torch_dtype,
-            reduce_dtype=self.torch_dtype,
-            buffer_dtype=self.torch_dtype,
-        )
+        if is_smolvla:
+            # SmolVLA deliberately mixes bf16 VLM blocks with fp32 action/state
+            # heads. Do not force FSDP's uniform low-precision param casting.
+            mixed_precision = MixedPrecision(
+                cast_forward_inputs=False,
+                cast_root_forward_inputs=False,
+            )
+        else:
+            mixed_precision = MixedPrecision(
+                param_dtype=self.torch_dtype,
+                reduce_dtype=self.torch_dtype,
+                buffer_dtype=self.torch_dtype,
+            )
 
         if self._cfg.model.sharding_strategy == "full_shard":
             sharding_strategy = ShardingStrategy.FULL_SHARD

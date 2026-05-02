@@ -484,6 +484,15 @@ def validate_embodied_cfg(cfg):
     assert cfg.actor.model.model_name in SUPPORTED_MODEL_ARCHS, (
         f"Model {cfg.actor.model.model_name} is not supported"
     )
+    if cfg.actor.model.model_name == "smolvla":
+        train_num_images = int(cfg.env.train.get("num_images_in_input", 1))
+        eval_num_images = int(cfg.env.eval.get("num_images_in_input", 1))
+        if train_num_images < 2 or eval_num_images < 2:
+            raise ValueError(
+                "SmolVLA checkpoints in this CRL integration require two real camera "
+                "streams. Set env.train.num_images_in_input=2 and "
+                "env.eval.num_images_in_input=2."
+            )
 
     # process num-envs
     from rlinf.scheduler import Cluster

@@ -50,9 +50,11 @@ if [ "${ACTIVATE_LEROBOT_ENV:-false}" = "true" ]; then
     source ~/miniconda3/bin/activate "$CONDA_ENV"
 fi
 
-POLICY_INPUT="${1:-${SMOLVLA_POLICY_PATH:-}}"
+DEFAULT_SMOLVLA_POLICY_PATH="/home/s2758621/Continual_VLA_RL/model/smolvla/libero_object_20demo_base/pretrained_model"
+
+POLICY_INPUT="${1:-$DEFAULT_SMOLVLA_POLICY_PATH}"
 if [ -z "$POLICY_INPUT" ]; then
-    echo "ERROR: pass a SmolVLA checkpoint path, or set SMOLVLA_POLICY_PATH."
+    echo "ERROR: pass a SmolVLA checkpoint path."
     exit 1
 fi
 shift || true
@@ -81,7 +83,7 @@ resolve_policy_path() {
     return 1
 }
 
-export SMOLVLA_POLICY_PATH="$(resolve_policy_path "$POLICY_INPUT")"
+SMOLVLA_POLICY_PATH="$(resolve_policy_path "$POLICY_INPUT")"
 
 CONFIG_NAME="${CONFIG_NAME:-crl_experiment/libero_object_grpo_smolvla_eval_object}"
 BENCHMARK="${BENCHMARK:-libero_object}"
@@ -123,6 +125,7 @@ echo "  LIBERO_REPO_PATH=$LIBERO_REPO_PATH"
 HYDRA_OVERRIDES=(
     "rollout.model_dir=$SMOLVLA_POLICY_PATH"
     "actor.checkpoint_load_path=$SMOLVLA_POLICY_PATH"
+    "smolvla.base_policy_path=$SMOLVLA_POLICY_PATH"
     "actor.model.model_name=smolvla"
     "actor.model.is_lora=False"
     "actor.model.libero_task=$BENCHMARK"
@@ -135,7 +138,6 @@ HYDRA_OVERRIDES=(
     "actor.model.max_parallel_tasks=$MAX_PARALLEL_TASKS"
     "env.eval.num_envs=$EVAL_NUM_ENVS"
     "algorithm.eval_rollout_epoch=$EVAL_ROLLOUT_EPOCH"
-    "actor.tokenizer.tokenizer_model=$SMOLVLA_POLICY_PATH"
 )
 
 if [ -n "$FIXED_TASK_IDS" ]; then

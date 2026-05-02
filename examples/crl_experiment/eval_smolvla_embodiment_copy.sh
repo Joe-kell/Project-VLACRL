@@ -38,7 +38,7 @@ VLA_LIBERO_ROOT="${VLA_LIBERO_ROOT:-$OCTO_ROOT/scripts/smolvla/vla-libero}"
 # Use only this conda environment for the eval (hard-pinned to avoid stale submit-shell overrides).
 CONDA_ENV="vlacrl_libplus_smolvla"
 
-DEFAULT_SMOLVLA_POLICY_PATH="/home/s2758621/Octo_RL/checkpoints/smolvla_libero_object_20demo/job_3441070/checkpoints/last/pretrained_model"
+DEFAULT_SMOLVLA_POLICY_PATH="/home/s2758621/Continual_VLA_RL/model/smolvla/libero_object_20demo_base/pretrained_model"
 
 # Force intended sources; do not inherit stale submit-shell paths.
 # CRL's env worker imports `libero.libero.*`, so this must be the LIBERO repo root.
@@ -146,10 +146,10 @@ if errors:
     raise SystemExit(1)
 PY
 
-POLICY_INPUT="${1:-${SMOLVLA_POLICY_PATH:-$DEFAULT_SMOLVLA_POLICY_PATH}}"
+POLICY_INPUT="${1:-$DEFAULT_SMOLVLA_POLICY_PATH}"
 
 if [ -z "$POLICY_INPUT" ]; then
-    echo "ERROR: pass a SmolVLA checkpoint path, or set SMOLVLA_POLICY_PATH."
+    echo "ERROR: pass a SmolVLA checkpoint path."
     exit 1
 fi
 
@@ -180,7 +180,7 @@ resolve_policy_path() {
     return 1
 }
 
-export SMOLVLA_POLICY_PATH="$(resolve_policy_path "$POLICY_INPUT")"
+SMOLVLA_POLICY_PATH="$(resolve_policy_path "$POLICY_INPUT")"
 
 CONFIG_NAME="${CONFIG_NAME:-crl_experiment/libero_object_grpo_smolvla_eval_object}"
 BENCHMARK="${BENCHMARK:-libero_object}"
@@ -230,6 +230,7 @@ echo "  LIBERO_REPO_PATH=$LIBERO_REPO_PATH"
 HYDRA_OVERRIDES=(
     "rollout.model_dir=$SMOLVLA_POLICY_PATH"
     "actor.checkpoint_load_path=$SMOLVLA_POLICY_PATH"
+    "smolvla.base_policy_path=$SMOLVLA_POLICY_PATH"
     "actor.model.model_name=smolvla"
     "actor.model.is_lora=False"
     "actor.model.libero_task=$BENCHMARK"
@@ -247,7 +248,6 @@ HYDRA_OVERRIDES=(
     "env.train.max_episode_steps=$MAX_EPISODE_STEPS"
     "env.eval.num_images_in_input=$NUM_IMAGES_IN_INPUT"
     "env.train.num_images_in_input=$NUM_IMAGES_IN_INPUT"
-    "actor.tokenizer.tokenizer_model=$SMOLVLA_POLICY_PATH"
 )
 
 if [ -n "$FIXED_TASK_IDS" ]; then

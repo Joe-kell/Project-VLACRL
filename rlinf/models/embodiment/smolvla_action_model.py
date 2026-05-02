@@ -28,6 +28,8 @@ import numpy as np
 import torch
 from torch.distributions import Normal
 
+from rlinf.config import torch_dtype_from_precision
+
 
 def _ensure_lerobot_src_on_path() -> None:
     """Allow CRL eval jobs to use the LeRobot source checkout used for SFT."""
@@ -271,6 +273,12 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+        requested_precision = _get_cfg(cfg, "precision", None)
+        self.target_dtype = (
+            torch_dtype_from_precision(requested_precision)
+            if requested_precision is not None
+            else None
+        )
 
         empty_cameras = int(_get_cfg(cfg, "empty_cameras", 1))
 
@@ -288,7 +296,12 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
 
         init_log_std = float(np.log(max(self.train_action_std, 1e-8)))
         self.log_std = torch.nn.Parameter(
-            torch.full((self.action_dim,), init_log_std, dtype=torch.float32)
+            torch.full(
+                (self.action_dim,),
+                init_log_std,
+                dtype=torch.float32,
+                device=self.device,
+            )
         )
 
         self.policy_cfg = policy_cfg
@@ -392,6 +405,10 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         print(f"  policy_chunk_size={getattr(self.policy.config, 'chunk_size', '<unknown>')}")
         print(f"  policy_n_action_steps={getattr(self.policy.config, 'n_action_steps', '<unknown>')}")
         print(f"  empty_cameras={getattr(self.policy.config, 'empty_cameras', '<unknown>')}")
+        print(f"  requested_runtime_dtype={self.target_dtype}")
+        print(f"  state_proj_dtype={self._module_param_dtype(self.policy.model.state_proj)}")
+        print(f"  action_in_proj_dtype={self._module_param_dtype(self.policy.model.action_in_proj)}")
+        print(f"  action_out_proj_dtype={self._module_param_dtype(self.policy.model.action_out_proj)}")
         print(f"  image_features={list(self.policy.config.image_features.keys())}")
         print(f"  input_features={list(self.policy.config.input_features.keys())}")
         print(f"  output_features={list(self.policy.config.output_features.keys())}")
@@ -531,12 +548,12 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         return self.default_forward(**kwargs)
 
     def to(self, *args, **kwargs):  # noqa: D401
-        super().to(*args, **kwargs)
-        if args and isinstance(args[0], (str, torch.device)):
-            self.device = torch.device(args[0])
-            self.policy_cfg.device = str(self.device)
-        elif "device" in kwargs and kwargs["device"] is not None:
-            self.device = torch.device(kwargs["device"])
+        device, dtype = self._parse_to_device_dtype(*args, **kwargs)
+        if dtype is not None:
+            self.target_dtype = dtype
+        if device is not None:
+            super().to(device=device)
+            self.device = torch.device(device)
             self.policy_cfg.device = str(self.device)
         return self
 
@@ -669,7 +686,8 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         return step_actions[:, None, :]
 
     def _zero_noise_like_policy_batch(self, policy_batch: dict[str, Any]) -> torch.Tensor:
-        device, dtype, batch_size = self._first_tensor_device_dtype(policy_batch)
+        device, _, batch_size = self._first_tensor_device_dtype(policy_batch)
+        dtype = self._policy_action_dtype()
         action_dim = int(self.policy.config.action_feature.shape[0])
         chunk_size = int(getattr(self.policy.config, "chunk_size", self.num_action_chunks))
         max_action_dim = int(getattr(self.policy.config, "max_action_dim", action_dim))
@@ -784,6 +802,41 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         batch["task"] = list(raw_obs["task_descriptions"])
         return batch
 
+    def _input_dtype(self) -> torch.dtype:
+        return self._module_param_dtype(self.policy.model.state_proj)
+
+    @staticmethod
+    def _module_param_dtype(module: torch.nn.Module) -> torch.dtype:
+        try:
+            return next(module.parameters()).dtype
+        except StopIteration:
+            return torch.float32
+
+    def _policy_action_dtype(self) -> torch.dtype:
+        return self._module_param_dtype(self.policy.model.action_in_proj)
+
+    @staticmethod
+    def _parse_to_device_dtype(*args, **kwargs) -> tuple[torch.device | None, torch.dtype | None]:
+        device = kwargs.get("device", None)
+        dtype = kwargs.get("dtype", None)
+
+        if args:
+            first = args[0]
+            if isinstance(first, torch.Tensor):
+                device = first.device
+                dtype = first.dtype if first.is_floating_point() else dtype
+            elif isinstance(first, torch.dtype):
+                dtype = first
+            elif isinstance(first, (str, torch.device)):
+                device = first
+
+        if len(args) >= 2 and isinstance(args[1], torch.dtype):
+            dtype = args[1]
+
+        if device is not None:
+            device = torch.device(device)
+        return device, dtype
+
     def _add_images(self, batch: dict[str, Any], images_and_states: dict[str, Any]) -> None:
         expected_keys = [
             key
@@ -838,7 +891,7 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         return torch.as_tensor(value)
 
     def _state_to_tensor(self, value: Any) -> torch.Tensor:
-        state = self._to_tensor(value).to(dtype=torch.float32)
+        state = self._to_tensor(value).to(dtype=self._input_dtype())
         if state.ndim == 1:
             state = state.unsqueeze(0)
         if state.ndim != 2:
@@ -859,7 +912,7 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
                 f"or [B,T,C,H,W], got {tuple(image.shape)}."
             )
 
-        image = image.to(dtype=torch.float32)
+        image = image.to(dtype=self._input_dtype())
         if image.numel() > 0 and image.max() > 1.5:
             image = image / 255.0
         return image

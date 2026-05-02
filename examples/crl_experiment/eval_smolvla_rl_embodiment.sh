@@ -37,7 +37,7 @@ if [ ! -f "$CHECKPOINT_PATH" ]; then
     exit 1
 fi
 
-SMOLVLA_BASE_POLICY_PATH="${SMOLVLA_BASE_POLICY_PATH_ARG:-${SMOLVLA_BASE_POLICY_PATH:-/home/s2758621/Octo_RL/checkpoints/smolvla_libero_object_20demo/job_3441070/checkpoints/last/pretrained_model}}"
+SMOLVLA_BASE_POLICY_PATH="${SMOLVLA_BASE_POLICY_PATH_ARG:-${SMOLVLA_BASE_POLICY_PATH:-/home/s2758621/Continual_VLA_RL/model/smolvla/libero_object_20demo_base/pretrained_model}}"
 
 if [ ! -f "${SMOLVLA_BASE_POLICY_PATH}/config.json" ] || [ ! -f "${SMOLVLA_BASE_POLICY_PATH}/model.safetensors" ]; then
     echo "ERROR: SMOLVLA_BASE_POLICY_PATH is not a valid LeRobot pretrained_model directory:"
@@ -53,15 +53,13 @@ echo "Config Name: $CONFIG_NAME"
 echo "Start Time: $(date)"
 echo ""
 
-export SMOLVLA_POLICY_PATH="$SMOLVLA_BASE_POLICY_PATH"
 export EVAL_STEP_NUMBER="$STEP_NUMBER"
 
 bash examples/embodiment/eval_embodiment.sh \
     "${CONFIG_NAME}" \
     rollout.model_dir="${CHECKPOINT_PATH}" \
     actor.checkpoint_load_path="${CHECKPOINT_PATH}" \
-    actor.model.base_policy_path="${SMOLVLA_BASE_POLICY_PATH}" \
-    actor.tokenizer.tokenizer_model="${SMOLVLA_BASE_POLICY_PATH}" \
+    smolvla.base_policy_path="${SMOLVLA_BASE_POLICY_PATH}" \
     actor.model.model_name=smolvla \
     actor.model.is_lora=False
 
