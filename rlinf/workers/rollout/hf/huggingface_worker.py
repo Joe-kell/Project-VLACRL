@@ -127,7 +127,18 @@ class MultiStepRolloutWorker(Worker):
     def init_worker(self):
         self.hf_model = get_model(self.cfg.rollout.model_dir, self.cfg.actor.model)
         self.hf_model.setup_params(self.model_config, self.cfg)
-        self.hf_model.to(self.precision)
+        if self.cfg.actor.model.get("model_name") == "smolvla":
+            # SmolVLA is natively mixed precision. A global dtype cast here
+            # breaks LeRobot's fp32 action/state projection path, especially
+            # after PEFT wraps the model and bypasses the wrapper's custom to().
+            device = (
+                torch.device("cuda", self.device)
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            )
+            self.hf_model.to(device=device)
+        else:
+            self.hf_model.to(self.precision)
         self.hf_model.eval()
         self.setup_sample_params()
         if self.cfg.rollout.get("enable_offload", False):

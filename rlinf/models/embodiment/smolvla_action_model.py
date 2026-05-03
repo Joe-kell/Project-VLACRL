@@ -208,6 +208,14 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
     to produce PPO/GRPO-compatible logprobs.
     """
 
+    _NATIVE_FP32_MODULE_NAMES = (
+        "state_proj",
+        "action_in_proj",
+        "action_out_proj",
+        "action_time_mlp_in",
+        "action_time_mlp_out",
+    )
+
     def __init__(self, model_path: str | os.PathLike[str], cfg: Any):
         super().__init__()
         _ensure_lerobot_src_on_path()
@@ -312,6 +320,7 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
             config=policy_cfg,
             local_files_only=self.local_files_only,
         )
+        self.restore_native_mixed_precision()
         self.policy.eval()
 
         preprocessor_overrides = {
@@ -409,9 +418,34 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         print(f"  state_proj_dtype={self._module_param_dtype(self.policy.model.state_proj)}")
         print(f"  action_in_proj_dtype={self._module_param_dtype(self.policy.model.action_in_proj)}")
         print(f"  action_out_proj_dtype={self._module_param_dtype(self.policy.model.action_out_proj)}")
+        print(f"  action_time_mlp_in_dtype={self._module_param_dtype(self.policy.model.action_time_mlp_in)}")
+        print(f"  action_time_mlp_out_dtype={self._module_param_dtype(self.policy.model.action_time_mlp_out)}")
         print(f"  image_features={list(self.policy.config.image_features.keys())}")
         print(f"  input_features={list(self.policy.config.input_features.keys())}")
         print(f"  output_features={list(self.policy.config.output_features.keys())}")
+
+    def restore_native_mixed_precision(self):
+        """Keep LeRobot SmolVLA's fp32 action/state heads after external casts.
+
+        Native SmolVLA explicitly feeds fp32 state/action tensors and upcasts
+        denoising suffix outputs to fp32 before action_out_proj. PEFT/FSDP
+        wrappers can still call Module._apply(dtype=bf16) around this wrapper,
+        so pin these small projection heads back to fp32.
+        """
+        if not hasattr(self, "policy") or not hasattr(self.policy, "model"):
+            return self
+
+        smolvla_model = self.policy.model
+        for module_name in self._NATIVE_FP32_MODULE_NAMES:
+            module = getattr(smolvla_model, module_name, None)
+            if module is not None:
+                module.to(dtype=torch.float32)
+        return self
+
+    def _apply(self, fn):
+        result = super()._apply(fn)
+        self.restore_native_mixed_precision()
+        return result
 
     def setup_params(self, model_config, cfg) -> None:
         del model_config, cfg
@@ -555,6 +589,7 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
             super().to(device=device)
             self.device = torch.device(device)
             self.policy_cfg.device = str(self.device)
+        self.restore_native_mixed_precision()
         return self
 
     def predict_action_batch(self, raw_obs: dict, mode: str = "eval") -> np.ndarray:
