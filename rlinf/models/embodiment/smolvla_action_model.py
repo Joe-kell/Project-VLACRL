@@ -273,6 +273,11 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         self.policy_batch_prefix = str(
             _get_cfg(cfg, "policy_batch_prefix", "smolvla_pb__")
         )
+        self.compact_replay_images = _as_bool(
+            _get_cfg(cfg, "compact_replay_images", True), True
+        )
+        replay_image_precision = _get_cfg(cfg, "replay_image_dtype", "bf16")
+        self.replay_image_dtype = torch_dtype_from_precision(replay_image_precision)
         self._logged_action_stats = False
         self._logged_step_action_stats = False
         self._action_queues: list[deque[np.ndarray]] = []
@@ -467,7 +472,9 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
         packed: dict[str, torch.Tensor] = {}
         for key, value in policy_batch.items():
             if torch.is_tensor(value):
-                packed[f"{self.policy_batch_prefix}{key}"] = value
+                packed[f"{self.policy_batch_prefix}{key}"] = (
+                    self._pack_replay_tensor(key, value)
+                )
         if not packed:
             raise RuntimeError(
                 "SmolVLA policy batch had no tensor fields to pack for replay."
@@ -487,7 +494,30 @@ class SmolVLAForEvalActionPrediction(torch.nn.Module):
                 "No SmolVLA packed policy batch keys found in replay batch. "
                 f"Expected keys prefixed with '{self.policy_batch_prefix}'."
             )
+        for key, value in list(policy_batch.items()):
+            if torch.is_tensor(value):
+                policy_batch[key] = self._unpack_replay_tensor(key, value)
         return policy_batch
+
+    def _pack_replay_tensor(self, key: str, value: torch.Tensor) -> torch.Tensor:
+        if self._should_compact_replay_image(key, value):
+            return value.to(dtype=self.replay_image_dtype)
+        return value
+
+    def _unpack_replay_tensor(self, key: str, value: torch.Tensor) -> torch.Tensor:
+        if self._should_compact_replay_image(key, value):
+            return value.to(dtype=self._input_dtype()).contiguous()
+        return value
+
+    def _should_compact_replay_image(self, key: str, value: torch.Tensor) -> bool:
+        return (
+            self.compact_replay_images
+            and value.is_floating_point()
+            and key in self._smolvla_image_feature_keys()
+        )
+
+    def _smolvla_image_feature_keys(self) -> set[str]:
+        return set(getattr(self.policy.config, "image_features", {}).keys())
 
     def rollout_train_step(
         self, policy_batch: dict[str, torch.Tensor]

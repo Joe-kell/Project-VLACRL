@@ -63,21 +63,21 @@ case "$SMOLVLA_HW_PROFILE" in
     rtx2080ti)
         DEFAULT_SMOLVLA_ATTN_IMPL="sdpa"
         DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="1"
-        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="8192"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="4096"
         DEFAULT_SMOLVLA_USE_AMP="true"
         DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
         ;;
     a40)
         DEFAULT_SMOLVLA_ATTN_IMPL="sdpa"
         DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="1"
-        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="8192"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="4096"
         DEFAULT_SMOLVLA_USE_AMP="true"
         DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
         ;;
     l40s)
         DEFAULT_SMOLVLA_ATTN_IMPL="flash_attention_2"
         DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="16"
-        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="8192"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="4096"
         DEFAULT_SMOLVLA_USE_AMP="true"
         DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
         ;;
@@ -97,12 +97,92 @@ SMOLVLA_GRADIENT_CHECKPOINTING="${SMOLVLA_GRADIENT_CHECKPOINTING:-$DEFAULT_SMOLV
 SMOLVLA_ACTOR_GPUS="${SMOLVLA_ACTOR_GPUS:-0-1}"
 SMOLVLA_ROLLOUT_GPUS="${SMOLVLA_ROLLOUT_GPUS:-2-3}"
 SMOLVLA_ENV_GPUS="${SMOLVLA_ENV_GPUS:-2-3}"
-SMOLVLA_NUM_GROUP_ENVS="${SMOLVLA_NUM_GROUP_ENVS:-12}"
-SMOLVLA_ROLLOUT_EPOCH="${SMOLVLA_ROLLOUT_EPOCH:-11}"
+# Match the OpenVLA-OFT LIBERO-object rollout budget:
+# 16 group envs * 8 rollout epochs * group_size 8 = 1024 episodes/update.
+SMOLVLA_NUM_GROUP_ENVS="${SMOLVLA_NUM_GROUP_ENVS:-16}"
+SMOLVLA_ROLLOUT_EPOCH="${SMOLVLA_ROLLOUT_EPOCH:-8}"
+SMOLVLA_GROUP_SIZE="${SMOLVLA_GROUP_SIZE:-8}"
+SMOLVLA_N_CHUNK_STEPS="${SMOLVLA_N_CHUNK_STEPS:-64}"
 SMOLVLA_IS_LORA="${SMOLVLA_IS_LORA:-true}"
 SMOLVLA_LORA_RANK="${SMOLVLA_LORA_RANK:-32}"
 SMOLVLA_LORA_ALPHA="${SMOLVLA_LORA_ALPHA:-32}"
 SMOLVLA_LORA_DROPOUT="${SMOLVLA_LORA_DROPOUT:-0.0}"
+SMOLVLA_COMPACT_REPLAY_IMAGES="${SMOLVLA_COMPACT_REPLAY_IMAGES:-true}"
+SMOLVLA_REPLAY_IMAGE_DTYPE="${SMOLVLA_REPLAY_IMAGE_DTYPE:-bf16}"
+
+count_component_slots() {
+    local spec="$1"
+    local total=0
+    local part
+    local -a parts
+    IFS=',' read -ra parts <<< "$spec"
+    for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            local start="${BASH_REMATCH[1]}"
+            local end="${BASH_REMATCH[2]}"
+            if [ "$start" -gt "$end" ]; then
+                echo "ERROR: invalid GPU range: $part" >&2
+                return 1
+            fi
+            total=$((total + end - start + 1))
+        elif [[ "$part" =~ ^[0-9]+$ ]]; then
+            total=$((total + 1))
+        else
+            echo "ERROR: unsupported GPU placement component: $part" >&2
+            return 1
+        fi
+    done
+    echo "$total"
+}
+
+validate_smolvla_batch_geometry() {
+    local numeric_keys=(
+        SMOLVLA_MICRO_BATCH_SIZE
+        SMOLVLA_GLOBAL_BATCH_SIZE
+        SMOLVLA_NUM_GROUP_ENVS
+        SMOLVLA_ROLLOUT_EPOCH
+        SMOLVLA_GROUP_SIZE
+        SMOLVLA_N_CHUNK_STEPS
+    )
+    local key
+    for key in "${numeric_keys[@]}"; do
+        if ! [[ "${!key}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: $key must be a non-negative integer, got: ${!key}"
+            exit 1
+        fi
+    done
+
+    SMOLVLA_ACTOR_WORLD_SIZE="$(count_component_slots "$SMOLVLA_ACTOR_GPUS")"
+    if [ -z "$SMOLVLA_ACTOR_WORLD_SIZE" ] || [ "$SMOLVLA_ACTOR_WORLD_SIZE" -le 0 ]; then
+        echo "ERROR: could not infer actor world size from SMOLVLA_ACTOR_GPUS=$SMOLVLA_ACTOR_GPUS"
+        exit 1
+    fi
+
+    local accumulation_denominator=$((SMOLVLA_MICRO_BATCH_SIZE * SMOLVLA_ACTOR_WORLD_SIZE))
+    if (( SMOLVLA_GLOBAL_BATCH_SIZE % accumulation_denominator != 0 )); then
+        echo "ERROR: actor.global_batch_size must be divisible by micro_batch_size * actor_world_size"
+        echo "       global_batch_size=$SMOLVLA_GLOBAL_BATCH_SIZE micro_batch_size=$SMOLVLA_MICRO_BATCH_SIZE actor_world_size=$SMOLVLA_ACTOR_WORLD_SIZE"
+        exit 1
+    fi
+
+    SMOLVLA_TOTAL_ROLLOUT_SIZE=$((SMOLVLA_N_CHUNK_STEPS * SMOLVLA_ROLLOUT_EPOCH * SMOLVLA_NUM_GROUP_ENVS * SMOLVLA_GROUP_SIZE))
+    if (( SMOLVLA_TOTAL_ROLLOUT_SIZE % SMOLVLA_ACTOR_WORLD_SIZE != 0 )); then
+        echo "ERROR: total rollout size must divide evenly across actor ranks"
+        echo "       total_rollout_size=$SMOLVLA_TOTAL_ROLLOUT_SIZE actor_world_size=$SMOLVLA_ACTOR_WORLD_SIZE"
+        exit 1
+    fi
+
+    SMOLVLA_PER_ACTOR_ROLLOUT_SIZE=$((SMOLVLA_TOTAL_ROLLOUT_SIZE / SMOLVLA_ACTOR_WORLD_SIZE))
+    SMOLVLA_BATCH_SIZE_PER_ACTOR=$((SMOLVLA_GLOBAL_BATCH_SIZE / SMOLVLA_ACTOR_WORLD_SIZE))
+    if (( SMOLVLA_PER_ACTOR_ROLLOUT_SIZE % SMOLVLA_BATCH_SIZE_PER_ACTOR != 0 )); then
+        echo "ERROR: per-actor rollout size must be divisible by per-actor global batch size"
+        echo "       per_actor_rollout_size=$SMOLVLA_PER_ACTOR_ROLLOUT_SIZE batch_size_per_actor=$SMOLVLA_BATCH_SIZE_PER_ACTOR"
+        echo "       Adjust SMOLVLA_GLOBAL_BATCH_SIZE, SMOLVLA_NUM_GROUP_ENVS, or SMOLVLA_ROLLOUT_EPOCH."
+        exit 1
+    fi
+}
+
+validate_smolvla_batch_geometry
 
 if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
     echo "ERROR: SEED must be a non-negative integer, got: $SEED"
@@ -146,13 +226,21 @@ echo "SMOLVLA_GRADIENT_CHECKPOINTING: $SMOLVLA_GRADIENT_CHECKPOINTING"
 echo "SMOLVLA_ACTOR_GPUS: $SMOLVLA_ACTOR_GPUS"
 echo "SMOLVLA_ROLLOUT_GPUS: $SMOLVLA_ROLLOUT_GPUS"
 echo "SMOLVLA_ENV_GPUS: $SMOLVLA_ENV_GPUS"
+echo "SMOLVLA_ACTOR_WORLD_SIZE: $SMOLVLA_ACTOR_WORLD_SIZE"
 echo "SMOLVLA_NUM_GROUP_ENVS: $SMOLVLA_NUM_GROUP_ENVS"
 echo "SMOLVLA_ROLLOUT_EPOCH: $SMOLVLA_ROLLOUT_EPOCH"
+echo "SMOLVLA_GROUP_SIZE: $SMOLVLA_GROUP_SIZE"
+echo "SMOLVLA_N_CHUNK_STEPS: $SMOLVLA_N_CHUNK_STEPS"
+echo "SMOLVLA_TOTAL_ROLLOUT_SIZE: $SMOLVLA_TOTAL_ROLLOUT_SIZE"
+echo "SMOLVLA_PER_ACTOR_ROLLOUT_SIZE: $SMOLVLA_PER_ACTOR_ROLLOUT_SIZE"
+echo "SMOLVLA_BATCH_SIZE_PER_ACTOR: $SMOLVLA_BATCH_SIZE_PER_ACTOR"
 echo "MAX_EPOCH: ${MAX_EPOCH:-<config default>}"
 echo "SMOLVLA_IS_LORA: $SMOLVLA_IS_LORA"
 echo "SMOLVLA_LORA_RANK: $SMOLVLA_LORA_RANK"
 echo "SMOLVLA_LORA_ALPHA: $SMOLVLA_LORA_ALPHA"
 echo "SMOLVLA_LORA_DROPOUT: $SMOLVLA_LORA_DROPOUT"
+echo "SMOLVLA_COMPACT_REPLAY_IMAGES: $SMOLVLA_COMPACT_REPLAY_IMAGES"
+echo "SMOLVLA_REPLAY_IMAGE_DTYPE: $SMOLVLA_REPLAY_IMAGE_DTYPE"
 
 # Keep Ray's Unix socket paths short enough for AF_UNIX limits.
 RAY_TMP_BASE_DEFAULT="/tmp/r_${USER:-u}_${SLURM_JOB_ID:-smolvla}"
@@ -177,6 +265,8 @@ GPU_MONITOR_ENABLED="${GPU_MONITOR_ENABLED:-1}"
 GPU_MONITOR_INTERVAL="${GPU_MONITOR_INTERVAL:-5}"
 GPU_MONITOR_DIR="${GPU_MONITOR_DIR:-${REPO_ROOT}/logs/gpu_monitor}"
 GPU_MONITOR_PREFIX="${GPU_MONITOR_PREFIX:-smolvla_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)}"
+HOST_MONITOR_ENABLED="${HOST_MONITOR_ENABLED:-1}"
+HOST_MONITOR_INTERVAL="${HOST_MONITOR_INTERVAL:-$GPU_MONITOR_INTERVAL}"
 
 start_gpu_monitor() {
     if [ "$GPU_MONITOR_ENABLED" != "1" ]; then
@@ -229,8 +319,67 @@ stop_gpu_monitor() {
     fi
 }
 
+start_host_monitor() {
+    if [ "$HOST_MONITOR_ENABLED" != "1" ]; then
+        echo "Host memory monitor disabled."
+        return 0
+    fi
+
+    mkdir -p "$GPU_MONITOR_DIR"
+    HOST_MEMORY_LOG="${GPU_MONITOR_DIR}/${GPU_MONITOR_PREFIX}_host_memory.csv"
+    HOST_PROCESS_LOG="${GPU_MONITOR_DIR}/${GPU_MONITOR_PREFIX}_host_process.log"
+
+    echo "Host memory monitor logs:"
+    echo "  Host memory: $HOST_MEMORY_LOG"
+    echo "  Host process: $HOST_PROCESS_LOG"
+
+    (
+        echo "wall_time,mem_total_mib,mem_available_mib,mem_free_mib,buffers_mib,cached_mib,swap_total_mib,swap_free_mib,load1,load5,load15"
+        while true; do
+            wall_time="$(date --iso-8601=seconds)"
+            awk -v wall_time="$wall_time" '
+                /^MemTotal:/ { mem_total = $2 / 1024 }
+                /^MemAvailable:/ { mem_available = $2 / 1024 }
+                /^MemFree:/ { mem_free = $2 / 1024 }
+                /^Buffers:/ { buffers = $2 / 1024 }
+                /^Cached:/ { cached = $2 / 1024 }
+                /^SwapTotal:/ { swap_total = $2 / 1024 }
+                /^SwapFree:/ { swap_free = $2 / 1024 }
+                END {
+                    getline load_line < "/proc/loadavg"
+                    split(load_line, load, " ")
+                    printf "%s,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%s,%s,%s\n",
+                        wall_time, mem_total, mem_available, mem_free, buffers,
+                        cached, swap_total, swap_free, load[1], load[2], load[3]
+                }
+            ' /proc/meminfo || true
+            sleep "$HOST_MONITOR_INTERVAL"
+        done
+    ) >> "$HOST_MEMORY_LOG" &
+    HOST_MEMORY_MONITOR_PID=$!
+
+    (
+        while true; do
+            echo "===== $(date --iso-8601=seconds) ====="
+            ps -eo pid,ppid,rss,vsz,pcpu,pmem,comm,args --sort=-rss | head -n 40 || true
+            sleep "$HOST_MONITOR_INTERVAL"
+        done
+    ) >> "$HOST_PROCESS_LOG" &
+    HOST_PROCESS_MONITOR_PID=$!
+}
+
+stop_host_monitor() {
+    if [ -n "${HOST_MEMORY_MONITOR_PID:-}" ]; then
+        kill "$HOST_MEMORY_MONITOR_PID" 2>/dev/null || true
+    fi
+    if [ -n "${HOST_PROCESS_MONITOR_PID:-}" ]; then
+        kill "$HOST_PROCESS_MONITOR_PID" 2>/dev/null || true
+    fi
+}
+
 start_gpu_monitor
-trap stop_gpu_monitor EXIT
+start_host_monitor
+trap 'stop_gpu_monitor; stop_host_monitor' EXIT
 
 if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
     # shellcheck disable=SC1090
@@ -351,7 +500,7 @@ for TASK_ID in $(seq "$TASK_START" "$TASK_END"); do
         break
     fi
 
-    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} smolvla.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} ++cluster.component_placement.actor=${SMOLVLA_ACTOR_GPUS} ++cluster.component_placement.rollout=${SMOLVLA_ROLLOUT_GPUS} ++cluster.component_placement.env=${SMOLVLA_ENV_GPUS} algorithm.num_group_envs=${SMOLVLA_NUM_GROUP_ENVS} algorithm.rollout_epoch=${SMOLVLA_ROLLOUT_EPOCH} actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING} actor.model.is_lora=${SMOLVLA_IS_LORA} actor.model.lora_rank=${SMOLVLA_LORA_RANK} actor.model.lora_alpha=${SMOLVLA_LORA_ALPHA} actor.model.lora_dropout=${SMOLVLA_LORA_DROPOUT} env.train.num_images_in_input=2 env.eval.num_images_in_input=2"
+    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} smolvla.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} ++cluster.component_placement.actor=${SMOLVLA_ACTOR_GPUS} ++cluster.component_placement.rollout=${SMOLVLA_ROLLOUT_GPUS} ++cluster.component_placement.env=${SMOLVLA_ENV_GPUS} algorithm.num_group_envs=${SMOLVLA_NUM_GROUP_ENVS} algorithm.rollout_epoch=${SMOLVLA_ROLLOUT_EPOCH} algorithm.group_size=${SMOLVLA_GROUP_SIZE} actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING} actor.model.is_lora=${SMOLVLA_IS_LORA} actor.model.lora_rank=${SMOLVLA_LORA_RANK} actor.model.lora_alpha=${SMOLVLA_LORA_ALPHA} actor.model.lora_dropout=${SMOLVLA_LORA_DROPOUT} actor.model.compact_replay_images=${SMOLVLA_COMPACT_REPLAY_IMAGES} actor.model.replay_image_dtype=${SMOLVLA_REPLAY_IMAGE_DTYPE} env.train.num_images_in_input=2 env.eval.num_images_in_input=2"
 
     if [ -n "$CHECKPOINT_PATH" ]; then
         if [ "$SMOLVLA_IS_LORA" = "true" ]; then

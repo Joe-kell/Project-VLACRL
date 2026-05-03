@@ -15,6 +15,7 @@
 import gc
 import os
 from collections import defaultdict
+from typing import Any
 
 import numpy as np
 import torch
@@ -32,13 +33,144 @@ from rlinf.utils.metric_utils import compute_split_num
 from rlinf.utils.placement import HybridComponentPlacement
 
 
-def create_rollout_batch(data):
+def _bytes_to_mib(num_bytes: int) -> float:
+    return num_bytes / (1024**2)
+
+
+def _value_nbytes(value: Any) -> int:
+    if torch.is_tensor(value):
+        return int(value.numel() * value.element_size())
+    if isinstance(value, np.ndarray):
+        return int(value.nbytes)
+    if isinstance(value, dict):
+        return sum(_value_nbytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_value_nbytes(item) for item in value)
+    return 0
+
+
+def _first_array_like(value: Any) -> Any:
+    if torch.is_tensor(value) or isinstance(value, np.ndarray):
+        return value
+    if isinstance(value, dict):
+        for item in value.values():
+            first = _first_array_like(item)
+            if first is not None:
+                return first
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            first = _first_array_like(item)
+            if first is not None:
+                return first
+    return None
+
+
+def _value_entry_count(value: Any) -> int:
+    return len(value) if isinstance(value, (list, tuple)) else 1
+
+
+def _describe_array_like(value: Any) -> str:
+    first = _first_array_like(value)
+    if first is None:
+        return "first=<none>"
+    if torch.is_tensor(first):
+        return (
+            f"first_shape={tuple(first.shape)} first_dtype={first.dtype} "
+            f"first_device={first.device}"
+        )
+    return f"first_shape={first.shape} first_dtype={first.dtype}"
+
+
+def _process_memory_line() -> str:
+    try:
+        import psutil
+
+        mem = psutil.Process(os.getpid()).memory_info()
+        return (
+            f"pid={os.getpid()} rss={_bytes_to_mib(mem.rss):.1f}MiB "
+            f"vms={_bytes_to_mib(mem.vms):.1f}MiB"
+        )
+    except Exception:
+        status = {}
+        try:
+            with open(f"/proc/{os.getpid()}/status", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith(("VmRSS:", "VmHWM:", "VmSize:")):
+                        key, value = line.split(":", 1)
+                        status[key] = int(value.strip().split()[0])
+        except OSError:
+            return f"pid={os.getpid()} rss=<unavailable>"
+
+        def kib_to_mib(key: str) -> str:
+            return f"{status[key] / 1024:.1f}MiB" if key in status else "<unavailable>"
+
+        return (
+            f"pid={os.getpid()} rss={kib_to_mib('VmRSS')} "
+            f"hwm={kib_to_mib('VmHWM')} vms={kib_to_mib('VmSize')}"
+        )
+
+
+def _log_replay_memory(logger: Any, message: str) -> None:
+    if logger is not None:
+        logger.info(message)
+    else:
+        print(message, flush=True)
+
+
+def _replay_payload_stats(data: dict[str, Any]) -> tuple[int, list[tuple[str, int, int, str]]]:
+    stats = []
+    total_bytes = 0
+    for key, value in data.items():
+        num_bytes = _value_nbytes(value)
+        total_bytes += num_bytes
+        stats.append((key, num_bytes, _value_entry_count(value), _describe_array_like(value)))
+    stats.sort(key=lambda item: item[1], reverse=True)
+    return total_bytes, stats
+
+
+def _log_replay_payload_summary(
+    logger: Any,
+    label: str,
+    data: dict[str, Any],
+    top_k: int = 8,
+) -> None:
+    total_bytes, stats = _replay_payload_stats(data)
+    top_items = "; ".join(
+        f"{key}={_bytes_to_mib(num_bytes):.1f}MiB entries={entries} {description}"
+        for key, num_bytes, entries, description in stats[:top_k]
+    )
+    _log_replay_memory(
+        logger,
+        "[SmolVLA replay memory] "
+        f"{label}: total_tensor_payload={_bytes_to_mib(total_bytes):.1f}MiB "
+        f"keys={len(stats)} {_process_memory_line()} top=[{top_items}]",
+    )
+
+
+def create_rollout_batch(data, debug_label: str | None = None, logger: Any = None):
     ret_data = {}
     for key, value in data.items():
+        if debug_label is not None:
+            _log_replay_memory(
+                logger,
+                "[SmolVLA replay stack] "
+                f"{debug_label} key={key} pre_stack_payload="
+                f"{_bytes_to_mib(_value_nbytes(value)):.1f}MiB "
+                f"entries={_value_entry_count(value)} {_describe_array_like(value)} "
+                f"{_process_memory_line()}",
+            )
         if "env_info/" not in key:
             ret_data[key] = torch.stack(value, dim=0).contiguous().cpu()
         else:
             ret_data[key] = torch.cat(value, dim=0).contiguous().cpu()
+        if debug_label is not None:
+            _log_replay_memory(
+                logger,
+                "[SmolVLA replay stack] "
+                f"{debug_label} key={key} post_stack_payload="
+                f"{_bytes_to_mib(_value_nbytes(ret_data[key])):.1f}MiB "
+                f"{_describe_array_like(ret_data[key])} {_process_memory_line()}",
+            )
     return ret_data
 
 
@@ -123,6 +255,7 @@ class MultiStepRolloutWorker(Worker):
                 print(
                     f"[DEBUG] Action logging enabled. Saving to: {self.action_log_dir}"
                 )
+        self._smolvla_replay_schema_logged = False
 
     def init_worker(self):
         self.hf_model = get_model(self.cfg.rollout.model_dir, self.cfg.actor.model)
@@ -340,6 +473,16 @@ class MultiStepRolloutWorker(Worker):
         self.buffer_list = []
         for i in range(self.stage_num):
             self.buffer_list.append(defaultdict(list))
+        if is_smolvla:
+            _log_replay_memory(
+                self._logger,
+                "[SmolVLA replay memory] "
+                f"rollout_start rank={self._rank} global_step={global_step} "
+                f"rollout_epoch={self.cfg.algorithm.rollout_epoch} "
+                f"n_chunk_steps={self.cfg.algorithm.n_chunk_steps} "
+                f"num_group_envs={self.cfg.algorithm.num_group_envs} "
+                f"stage_num={self.stage_num} {_process_memory_line()}",
+            )
 
         for rollout_epoch in range(self.cfg.algorithm.rollout_epoch):
             self._logger.info(f"Now epoch is={rollout_epoch}")
@@ -368,6 +511,30 @@ class MultiStepRolloutWorker(Worker):
                         packed_policy_batch = self.hf_model.pack_policy_batch_for_replay(
                             policy_batch
                         )
+                        if not self._smolvla_replay_schema_logged:
+                            schema_tensors = dict(packed_policy_batch)
+                            schema_tensors["action_tokens"] = chunk_action_token
+                            schema_tensors["prev_logprobs"] = chunk_logprobs
+                            schema_tensors["prev_values"] = chunk_values
+                            _log_replay_payload_summary(
+                                self._logger,
+                                (
+                                    f"first_batch rank={self._rank} stage={i} "
+                                    f"epoch={rollout_epoch} step={step}"
+                                ),
+                                schema_tensors,
+                                top_k=32,
+                            )
+                            _, schema_stats = _replay_payload_stats(schema_tensors)
+                            for key, num_bytes, entries, description in schema_stats:
+                                _log_replay_memory(
+                                    self._logger,
+                                    "[SmolVLA replay schema] "
+                                    f"rank={self._rank} key={key} "
+                                    f"payload={_bytes_to_mib(num_bytes):.3f}MiB "
+                                    f"entries={entries} {description}",
+                                )
+                            self._smolvla_replay_schema_logged = True
                         for key, value in packed_policy_batch.items():
                             self.buffer_list[i][key].append(value.cpu().contiguous())
 
@@ -464,10 +631,27 @@ class MultiStepRolloutWorker(Worker):
                         for key, value in infos["episode"].items():
                             self.buffer_list[i][f"env_info/{key}"].append(value.cpu())
 
+            if is_smolvla:
+                for stage_id in range(self.stage_num):
+                    _log_replay_payload_summary(
+                        self._logger,
+                        (
+                            f"buffered_after_epoch rank={self._rank} "
+                            f"stage={stage_id} epoch={rollout_epoch}"
+                        ),
+                        self.buffer_list[stage_id],
+                    )
+
         # Save action logs to disk
         self.save_action_logs(global_step)
 
         for i in range(self.stage_num):
+            if is_smolvla:
+                _log_replay_payload_summary(
+                    self._logger,
+                    f"before_send_rollout_batch rank={self._rank} stage={i}",
+                    self.buffer_list[i],
+                )
             await self.send_rollout_batch(i)
             self.buffer_list[i].clear()
 
@@ -572,7 +756,23 @@ class MultiStepRolloutWorker(Worker):
         send_num = self._component_placement.get_world_size("rollout") * self.stage_num
         recv_num = self._component_placement.get_world_size("actor")
         split_num = compute_split_num(recv_num, send_num)
-        rollout_batch = create_rollout_batch(self.buffer_list[stage_id])
+        is_smolvla = self.cfg.actor.model.model_name == "smolvla"
+        debug_label = (
+            f"rank={self._rank} stage={stage_id} create_rollout_batch"
+            if is_smolvla
+            else None
+        )
+        rollout_batch = create_rollout_batch(
+            self.buffer_list[stage_id],
+            debug_label=debug_label,
+            logger=self._logger if is_smolvla else None,
+        )
+        if is_smolvla:
+            _log_replay_payload_summary(
+                self._logger,
+                f"after_create_rollout_batch rank={self._rank} stage={stage_id}",
+                rollout_batch,
+            )
         for i in range(split_num):
             rollout_batch_i = {}
             for key in rollout_batch.keys():
@@ -584,6 +784,23 @@ class MultiStepRolloutWorker(Worker):
                     rollout_batch_i[key] = torch.chunk(
                         rollout_batch[key], split_num, dim=0
                     )[i].contiguous()
+            if is_smolvla:
+                _log_replay_payload_summary(
+                    self._logger,
+                    (
+                        f"before_replay_put rank={self._rank} stage={stage_id} "
+                        f"split={i}/{split_num}"
+                    ),
+                    rollout_batch_i,
+                    top_k=6,
+                )
             await self.channel.put(
                 item=rollout_batch_i, queue_name=self._replay_buffer_name, async_op=True
             ).async_wait()
+            if is_smolvla:
+                _log_replay_memory(
+                    self._logger,
+                    "[SmolVLA replay memory] "
+                    f"after_replay_put rank={self._rank} stage={stage_id} "
+                    f"split={i}/{split_num} {_process_memory_line()}",
+                )

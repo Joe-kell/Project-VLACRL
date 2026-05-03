@@ -143,6 +143,8 @@ actor:
     train_action_std: 0.10
     min_action_std: 0.02
     policy_batch_prefix: "smolvla_pb__"
+    compact_replay_images: True
+    replay_image_dtype: "bf16"
     log_action_stats: False
     max_parallel_tasks: 1
     empty_cameras: 1
