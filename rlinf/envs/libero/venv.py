@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import warnings
+import os
 from multiprocessing import Pipe, connection
 from multiprocessing.context import Process
 from typing import Any, Callable, List, Optional, Tuple, Union
@@ -68,7 +69,7 @@ def _worker(
                 cmd, data = p.recv()
             except EOFError:  # the pipe has been closed
                 p.close()
-                break
+                os._exit(0)
             if cmd == "step":
                 env_return = env.step(data)
                 if obs_bufs is not None:
@@ -94,7 +95,14 @@ def _worker(
                 else:
                     p.send(obs)
             elif cmd == "close":
-                p.send(env.close())
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                try:
+                    p.send(None)
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
                 p.close()
                 break
             elif cmd == "render":

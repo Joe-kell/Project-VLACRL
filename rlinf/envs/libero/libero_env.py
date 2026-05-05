@@ -313,6 +313,14 @@ class LiberoEnv(gym.Env):
                 "bddl_file_name": task_bddl_file,
                 "seed": self.seed,
             }
+            egl_device_id = os.environ.get("MUJOCO_EGL_DEVICE_ID")
+            if (
+                "render_gpu_device_id" not in env_kwargs
+                and egl_device_id is not None
+                and egl_device_id.isdigit()
+            ):
+                env_kwargs["render_gpu_device_id"] = int(egl_device_id)
+
             if camera_overrides_per_task is not None:
                 task_id = int(self.task_ids[env_id])
                 if 0 <= task_id < len(camera_overrides_per_task):

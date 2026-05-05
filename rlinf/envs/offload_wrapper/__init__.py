@@ -12,4 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from rlinf.envs.offload_wrapper.maniskill_wrapper import ManiskillEnv as ManiskillEnv
+__all__ = ["ManiskillEnv", "LiberoEnv"]
+
+
+def __getattr__(name):
+    if name == "ManiskillEnv":
+        from rlinf.envs.offload_wrapper.maniskill_wrapper import ManiskillEnv
+
+        globals()[name] = ManiskillEnv
+        return ManiskillEnv
+
+    if name == "LiberoEnv":
+        from rlinf.envs.offload_wrapper.libero_wrapper import LiberoEnv
+
+        globals()[name] = LiberoEnv
+        return LiberoEnv
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

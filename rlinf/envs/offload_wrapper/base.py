@@ -13,7 +13,11 @@
 # limitations under the License.
 
 import torch
-from mani_skill.envs.utils.randomization.batched_rng import BatchedRNG
+
+try:
+    from mani_skill.envs.utils.randomization.batched_rng import BatchedRNG
+except ImportError:
+    BatchedRNG = None
 
 
 def recursive_to_device(obj, device):
@@ -37,6 +41,8 @@ def get_batch_rng_state(batched_rng):
 
 
 def set_batch_rng_state(state: dict):
+    if BatchedRNG is None:
+        raise ImportError("ManiSkill is required to restore BatchedRNG state")
     return BatchedRNG.from_rngs(state["rngs"])
 
 

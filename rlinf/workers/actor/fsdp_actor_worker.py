@@ -23,7 +23,6 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from peft import get_peft_model_state_dict
-from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullOptimStateDictConfig, FullStateDictConfig, StateDictType
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
@@ -72,27 +71,22 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.cfg = cfg
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
         self.device = torch.cuda.current_device()
-        world_size = self._world_size
 
-        # Skip init_device_mesh for simple_cnn - it triggers init_process_group()
-        # during Ray actor creation, before all workers are ready, causing TCPStore failures.
-        # device_mesh is not used anywhere else in the codebase so this is safe.
-        is_simple_cnn = cfg.actor.model.get("model_name") == "simple_cnn"
-        if is_simple_cnn:
-            self.device_mesh = None
-        else:
-            self.device_mesh = init_device_mesh(
-                "cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"]
-            )
+        # This mesh is unused by the FSDP actor. Creating it here can initialize
+        # the default process group during Ray actor construction, before every
+        # rank has reached init_worker(), which causes TCPStore/NCCL races.
+        self.device_mesh = None
 
         self._env_group_name = cfg.env.group_name
         self._rollout_group_name = cfg.rollout.group_name
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
-        self._weight_dst_rank_in_rollout = self._rank
-        if self._weight_dst_rank_in_rollout >= self._component_placement.get_world_size(
-            "rollout"
-        ):
-            self._weight_dst_rank_in_rollout = None
+        rollout_world_size = self._component_placement.get_world_size("rollout")
+        actor_world_size = self._component_placement.get_world_size("actor")
+        self._weight_dst_ranks_in_rollout = [
+            rank
+            for rank in range(rollout_world_size)
+            if rank % actor_world_size == self._rank
+        ]
 
         self._obs_queue_name = cfg.env.channel.queue_name
         self._action_queue_name = cfg.rollout.channel.queue_name
@@ -329,9 +323,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.load_fsdp_optimizer(self.device)
 
         state_dict = self.get_model_state_dict()
-        if self._weight_dst_rank_in_rollout is not None:
+        for rollout_rank in self._weight_dst_ranks_in_rollout:
             self.send(
-                state_dict, self._rollout_group_name, self._weight_dst_rank_in_rollout
+                state_dict,
+                self._rollout_group_name,
+                rollout_rank,
             )
         if self.cfg.actor.get("enable_offload", False):
             self.offload_fsdp_param_and_grad()
@@ -608,6 +604,41 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             return output_dict, bc_logits
         else:
             return output_dict
+
+    def _clip_grad_norm(self, max_norm):
+        if self.cfg.actor.model.get("model_name") == "smolvla":
+            return self._clip_mixed_dtype_grad_norm(max_norm)
+        return self.model.clip_grad_norm_(max_norm=max_norm)
+
+    def _clip_mixed_dtype_grad_norm(self, max_norm):
+        device = torch.device("cuda", self.device)
+        local_sq_norm = torch.zeros((), device=device, dtype=torch.float32)
+        for param in self.model.parameters():
+            if param.grad is None:
+                continue
+            grad = param.grad.detach()
+            if grad.is_sparse:
+                grad = grad.coalesce()._values()
+            grad = grad.float()
+            local_sq_norm += torch.sum(grad * grad)
+
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(
+                local_sq_norm, op=torch.distributed.ReduceOp.SUM
+            )
+
+        total_norm = torch.sqrt(local_sq_norm)
+        clip_coef = torch.clamp(
+            torch.tensor(float(max_norm), device=device, dtype=torch.float32)
+            / (total_norm + 1e-6),
+            max=1.0,
+        )
+        for param in self.model.parameters():
+            if param.grad is not None:
+                param.grad.detach().mul_(
+                    clip_coef.to(device=param.grad.device, dtype=param.grad.dtype)
+                )
+        return total_norm
 
     def run_training(self, is_last_step: bool = False):
         """
@@ -920,9 +951,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
             torch.cuda.empty_cache()
 
-            grad_norm = self.model.clip_grad_norm_(
-                max_norm=self.cfg.actor.optim.clip_grad
-            )
+            grad_norm = self._clip_grad_norm(max_norm=self.cfg.actor.optim.clip_grad)
             self.optimizer.step()
 
             # Increment training step counter

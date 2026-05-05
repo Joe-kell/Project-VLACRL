@@ -15,8 +15,10 @@
 import ctypes
 import gc
 import os
+from queue import Empty
 import subprocess
 import sys
+import time
 from typing import Optional
 
 import torch
@@ -143,6 +145,34 @@ def set_process_numa_affinity(gpu_id: int) -> None:
         print(f"Warning: Could not set NUMA affinity for GPU {gpu_id}: {e}")
 
 
+def _pin_simulator_process_to_rank_gpu(rank: int) -> Optional[str]:
+    """Make offloaded simulator children inherit a single rank-local render GPU."""
+    if os.environ.get("RLINF_ENV_PIN_VISIBLE_GPU", "1").lower() in {
+        "0",
+        "false",
+        "no",
+    }:
+        return None
+
+    visible_devices = [
+        device.strip()
+        for device in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if device.strip()
+    ]
+    if visible_devices:
+        selected_device = visible_devices[rank % len(visible_devices)]
+    else:
+        selected_device = str(rank)
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = selected_device
+    if selected_device.isdigit():
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = selected_device
+    else:
+        os.environ.pop("MUJOCO_EGL_DEVICE_ID", None)
+
+    return selected_device
+
+
 def recursive_to_own(obj):
     if isinstance(obj, torch.Tensor):
         return obj.clone() if obj.is_shared() else obj
@@ -212,10 +242,39 @@ class EnvManager:
         )
         self.process.start()
 
-        # Wait for initialization
-        result = self.result_queue.get(timeout=60)
-        if result["status"] != "ready":
-            raise RuntimeError(f"Simulator initialization failed: {result}")
+        # Wait for initialization. LIBERO can spawn many MuJoCo/render workers, so
+        # startup on slower nodes may legitimately take longer than one minute.
+        if hasattr(self.cfg, "get"):
+            default_timeout = self.cfg.get("offload_start_timeout", 600)
+        else:
+            default_timeout = 600
+        startup_timeout = int(os.environ.get("RLINF_ENV_START_TIMEOUT", default_timeout))
+        deadline = time.monotonic() + startup_timeout
+        while True:
+            if self.process is not None and not self.process.is_alive():
+                raise RuntimeError(
+                    "Simulator process exited before initialization completed "
+                    f"(env_cls={self.env_cls.__name__}, rank={self.rank}, "
+                    f"world_size={self.world_size}, exitcode={self.process.exitcode})"
+                )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Simulator initialization timed out "
+                    f"after {startup_timeout}s "
+                    f"(env_cls={self.env_cls.__name__}, rank={self.rank}, "
+                    f"world_size={self.world_size})"
+                )
+
+            try:
+                result = self.result_queue.get(timeout=min(5, remaining))
+            except Empty:
+                continue
+
+            if result["status"] != "ready":
+                raise RuntimeError(f"Simulator initialization failed: {result}")
+            break
 
     def stop_simulator(self):
         if self.env is not None:
@@ -331,9 +390,20 @@ def _simulator_worker(
     """Worker process for simulator"""
     from rlinf.envs.offload_wrapper.base import EnvOffloadMixin
 
+    assigned_gpu = _pin_simulator_process_to_rank_gpu(rank)
+    if assigned_gpu is not None:
+        print(
+            "[EnvManager] "
+            f"rank={rank}/{world_size} pinned offloaded simulator to "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+            f"MUJOCO_EGL_DEVICE_ID={os.environ.get('MUJOCO_EGL_DEVICE_ID', '<unset>')}",
+            flush=True,
+        )
+
     # Set NUMA affinity for the process to match the GPU rank
     if bind_numa:
-        set_process_numa_affinity(rank)
+        numa_gpu_id = int(assigned_gpu) if assigned_gpu and assigned_gpu.isdigit() else rank
+        set_process_numa_affinity(numa_gpu_id)
 
     from rlinf.utils.omega_resolver import omegaconf_register
 
@@ -357,7 +427,14 @@ def _simulator_worker(
                 command = command_queue.get()
 
                 if command["method"] == "shutdown":
-                    break
+                    # Offload teardown happens after get_state() has already saved
+                    # logical rollout state. For LIBERO, calling close() here can
+                    # block in robosuite/MuJoCo EGL destructors and broken vector-env
+                    # pipes. Exit the simulator process directly so OS process
+                    # teardown releases render contexts instead.
+                    command_queue.close()
+                    result_queue.close()
+                    os._exit(0)
 
                 method_name = command["method"]
                 args = command.get("args", [])

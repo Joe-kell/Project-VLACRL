@@ -74,11 +74,13 @@ class EmbodiedFSDP2Actor(FSDP2ModelManager, Worker):
         self._env_group_name = cfg.env.group_name
         self._rollout_group_name = cfg.rollout.group_name
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
-        self._weight_dst_rank_in_rollout = self._rank
-        if self._weight_dst_rank_in_rollout >= self._component_placement.get_world_size(
-            "rollout"
-        ):
-            self._weight_dst_rank_in_rollout = None
+        rollout_world_size = self._component_placement.get_world_size("rollout")
+        actor_world_size = self._component_placement.get_world_size("actor")
+        self._weight_dst_ranks_in_rollout = [
+            rank
+            for rank in range(rollout_world_size)
+            if rank % actor_world_size == self._rank
+        ]
 
         self._obs_queue_name = cfg.env.channel.queue_name
         self._action_queue_name = cfg.rollout.channel.queue_name
@@ -253,9 +255,11 @@ class EmbodiedFSDP2Actor(FSDP2ModelManager, Worker):
         state_dict = self.get_model_state_dict()
 
         # 3. Send state dict to rollout worker (Rollout can only grab AFTER we offloaded)
-        if self._weight_dst_rank_in_rollout is not None:
+        for rollout_rank in self._weight_dst_ranks_in_rollout:
             self.send(
-                state_dict, self._rollout_group_name, self._weight_dst_rank_in_rollout
+                state_dict,
+                self._rollout_group_name,
+                rollout_rank,
             )
 
         del state_dict

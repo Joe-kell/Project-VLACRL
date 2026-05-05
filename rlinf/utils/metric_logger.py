@@ -51,6 +51,11 @@ class MetricLogger:
             self.logger_backends = logger_backends
 
         wandb_proxy = logger_cfg.get("wandb_proxy", None)
+        wandb_init_timeout = float(
+            os.environ.get(
+                "WANDB_INIT_TIMEOUT", logger_cfg.get("wandb_init_timeout", 300)
+            )
+        )
         swanlab_mode = logger_cfg.get("swanlab_mode", "cloud")
         if len(self.logger_backends) > 0:
             assert all(
@@ -66,9 +71,10 @@ class MetricLogger:
             wandb_log_path = os.path.join(log_path, "wandb")
             os.makedirs(wandb_log_path, exist_ok=True)
 
-            settings = None
+            settings_kwargs = {"init_timeout": wandb_init_timeout}
             if wandb_proxy:
-                settings = wandb.Settings(https_proxy=wandb_proxy)
+                settings_kwargs["https_proxy"] = wandb_proxy
+            settings = wandb.Settings(**settings_kwargs)
             wandb.init(
                 project=project_name,
                 name=experiment_name,

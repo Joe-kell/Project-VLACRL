@@ -234,6 +234,8 @@ class MultiStepRolloutWorker(Worker):
         self.stage_num = cfg.rollout.pipeline_stage_num
 
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
+        actor_world_size = self._component_placement.get_world_size("actor")
+        self._weight_src_rank_in_actor = self._rank % actor_world_size
         self.channel = self.connect_channel(cfg.rollout.channel.name)
         for i in range(self._component_placement.get_world_size("rollout")):
             self.channel.create_queue(
@@ -732,7 +734,9 @@ class MultiStepRolloutWorker(Worker):
             print("Waiting for actor to offload memory...", self._rank)
             self._wait_for_actor_offload(threshold_gb=5.0)
         
-        param_state_dict = self.recv(self._actor_group_name, src_rank=self._rank)
+        param_state_dict = self.recv(
+            self._actor_group_name, src_rank=self._weight_src_rank_in_actor
+        )
         self.hf_model.load_state_dict(param_state_dict)
         del param_state_dict
         gc.collect()

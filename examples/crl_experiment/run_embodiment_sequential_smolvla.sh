@@ -5,8 +5,8 @@
 #SBATCH --partition=ICF-Free
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=40
-#SBATCH --mem=400G
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=490G
 #SBATCH --gres=gpu:nvidia_l40s:4
 
 ### Usage: bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh TASK_ID_OR_RANGE [CHECKPOINT_PATH] [MAX_EPOCH] [CONFIG_NAME] [SEED]
@@ -15,10 +15,11 @@
 ### Example (resume LoRA): bash examples/crl_experiment/run_embodiment_sequential_smolvla.sh 6 ./logs_smolvla/sequential_smolvla/task_5_seed1234/checkpoints/global_step_10/actor 10
 ### Notes:
 ###   - This file can now be submitted directly with `sbatch`.
-###   - Default placement uses 4 GPUs as two actor ranks plus two
-###     rollout/env ranks. This preserves the OpenVLA-OFT paper budget
-###     (10 * 11 * 12 * 8 = 10560 episodes/task) while splitting rollout
-###     buffer memory across two workers.
+###   - L40S placement uses all four GPUs for actor training and rollout/env
+###     collection. Env and rollout offload are enabled by default so rollout/env
+###     GPU memory is released before actor training.
+###   - L40S rollout geometry keeps group_size 8 and uses
+###     16 group envs * group_size 8 * 5 rollout epochs = 640 episodes/update.
 ###   - The launcher selects a hardware profile and applies matching Hydra overrides.
 ###   - Override detection with `SMOLVLA_HW_PROFILE={rtx2080ti|a40|l40s}` if needed.
 ###   - Precision is no longer overridden here; it comes from the Hydra config / model path.
@@ -32,7 +33,7 @@ set -euo pipefail
 
 TASK_INPUT=${1:-5}
 MANUAL_CHECKPOINT_PATH=${2:-}
-MAX_EPOCH=${3:-10}
+MAX_EPOCH=${3:-${SMOLVLA_MAX_EPOCH:-10}}
 CONFIG_NAME=${4:-crl_experiment/libero_object_grpo_smolvla_object}
 SEED=${5:-1234}
 EXPERIMENT_TYPE="sequential_smolvla"
@@ -59,6 +60,10 @@ detect_smolvla_hw_profile() {
 
 SMOLVLA_HW_PROFILE="${SMOLVLA_HW_PROFILE:-$(detect_smolvla_hw_profile)}"
 
+SMOLVLA_GLOBAL_BATCH_SIZE_USER_SET="${SMOLVLA_GLOBAL_BATCH_SIZE+x}"
+SMOLVLA_NUM_GROUP_ENVS_USER_SET="${SMOLVLA_NUM_GROUP_ENVS+x}"
+SMOLVLA_GROUP_SIZE_USER_SET="${SMOLVLA_GROUP_SIZE+x}"
+
 case "$SMOLVLA_HW_PROFILE" in
     rtx2080ti)
         DEFAULT_SMOLVLA_ATTN_IMPL="sdpa"
@@ -66,6 +71,11 @@ case "$SMOLVLA_HW_PROFILE" in
         DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="4096"
         DEFAULT_SMOLVLA_USE_AMP="true"
         DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
+        DEFAULT_SMOLVLA_ACTOR_GPUS="0-1"
+        DEFAULT_SMOLVLA_ROLLOUT_GPUS="0-3"
+        DEFAULT_SMOLVLA_ENV_GPUS="0-3"
+        DEFAULT_SMOLVLA_NUM_GROUP_ENVS="16"
+        DEFAULT_SMOLVLA_ROLLOUT_EPOCH="1"
         ;;
     a40)
         DEFAULT_SMOLVLA_ATTN_IMPL="sdpa"
@@ -73,13 +83,23 @@ case "$SMOLVLA_HW_PROFILE" in
         DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="4096"
         DEFAULT_SMOLVLA_USE_AMP="true"
         DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
+        DEFAULT_SMOLVLA_ACTOR_GPUS="0-1"
+        DEFAULT_SMOLVLA_ROLLOUT_GPUS="0-3"
+        DEFAULT_SMOLVLA_ENV_GPUS="0-3"
+        DEFAULT_SMOLVLA_NUM_GROUP_ENVS="16"
+        DEFAULT_SMOLVLA_ROLLOUT_EPOCH="1"
         ;;
     l40s)
         DEFAULT_SMOLVLA_ATTN_IMPL="flash_attention_2"
-        DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="16"
-        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="4096"
+        DEFAULT_SMOLVLA_MICRO_BATCH_SIZE="20"
+        DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE="2560"
         DEFAULT_SMOLVLA_USE_AMP="true"
         DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING="true"
+        DEFAULT_SMOLVLA_ACTOR_GPUS="0-3"
+        DEFAULT_SMOLVLA_ROLLOUT_GPUS="0-3"
+        DEFAULT_SMOLVLA_ENV_GPUS="0-3"
+        DEFAULT_SMOLVLA_NUM_GROUP_ENVS="16"
+        DEFAULT_SMOLVLA_ROLLOUT_EPOCH="5"
         ;;
     *)
         echo "ERROR: unsupported SMOLVLA_HW_PROFILE: $SMOLVLA_HW_PROFILE"
@@ -94,13 +114,12 @@ SMOLVLA_MICRO_BATCH_SIZE="${SMOLVLA_MICRO_BATCH_SIZE:-$DEFAULT_SMOLVLA_MICRO_BAT
 SMOLVLA_GLOBAL_BATCH_SIZE="${SMOLVLA_GLOBAL_BATCH_SIZE:-$DEFAULT_SMOLVLA_GLOBAL_BATCH_SIZE}"
 SMOLVLA_USE_AMP="${SMOLVLA_USE_AMP:-$DEFAULT_SMOLVLA_USE_AMP}"
 SMOLVLA_GRADIENT_CHECKPOINTING="${SMOLVLA_GRADIENT_CHECKPOINTING:-$DEFAULT_SMOLVLA_GRADIENT_CHECKPOINTING}"
-SMOLVLA_ACTOR_GPUS="${SMOLVLA_ACTOR_GPUS:-0-1}"
-SMOLVLA_ROLLOUT_GPUS="${SMOLVLA_ROLLOUT_GPUS:-2-3}"
-SMOLVLA_ENV_GPUS="${SMOLVLA_ENV_GPUS:-2-3}"
-# Match the OpenVLA-OFT LIBERO-object rollout budget:
-# 16 group envs * 8 rollout epochs * group_size 8 = 1024 episodes/update.
-SMOLVLA_NUM_GROUP_ENVS="${SMOLVLA_NUM_GROUP_ENVS:-16}"
-SMOLVLA_ROLLOUT_EPOCH="${SMOLVLA_ROLLOUT_EPOCH:-8}"
+SMOLVLA_ACTOR_GPUS="${SMOLVLA_ACTOR_GPUS:-$DEFAULT_SMOLVLA_ACTOR_GPUS}"
+SMOLVLA_ROLLOUT_GPUS="${SMOLVLA_ROLLOUT_GPUS:-$DEFAULT_SMOLVLA_ROLLOUT_GPUS}"
+SMOLVLA_ENV_GPUS="${SMOLVLA_ENV_GPUS:-$DEFAULT_SMOLVLA_ENV_GPUS}"
+# SmolVLA rollout profile; explicit env vars can still override this.
+SMOLVLA_NUM_GROUP_ENVS="${SMOLVLA_NUM_GROUP_ENVS:-$DEFAULT_SMOLVLA_NUM_GROUP_ENVS}"
+SMOLVLA_ROLLOUT_EPOCH="${SMOLVLA_ROLLOUT_EPOCH:-$DEFAULT_SMOLVLA_ROLLOUT_EPOCH}"
 SMOLVLA_GROUP_SIZE="${SMOLVLA_GROUP_SIZE:-8}"
 SMOLVLA_N_CHUNK_STEPS="${SMOLVLA_N_CHUNK_STEPS:-64}"
 SMOLVLA_IS_LORA="${SMOLVLA_IS_LORA:-true}"
@@ -109,6 +128,11 @@ SMOLVLA_LORA_ALPHA="${SMOLVLA_LORA_ALPHA:-32}"
 SMOLVLA_LORA_DROPOUT="${SMOLVLA_LORA_DROPOUT:-0.0}"
 SMOLVLA_COMPACT_REPLAY_IMAGES="${SMOLVLA_COMPACT_REPLAY_IMAGES:-true}"
 SMOLVLA_REPLAY_IMAGE_DTYPE="${SMOLVLA_REPLAY_IMAGE_DTYPE:-bf16}"
+SMOLVLA_ENV_ENABLE_OFFLOAD="${SMOLVLA_ENV_ENABLE_OFFLOAD:-true}"
+SMOLVLA_ROLLOUT_ENABLE_OFFLOAD="${SMOLVLA_ROLLOUT_ENABLE_OFFLOAD:-true}"
+SMOLVLA_ACTOR_ENABLE_OFFLOAD="${SMOLVLA_ACTOR_ENABLE_OFFLOAD:-false}"
+SMOLVLA_AUTO_MICRO_GEOMETRY="${SMOLVLA_AUTO_MICRO_GEOMETRY:-true}"
+SMOLVLA_GEOMETRY_NOTE=""
 
 count_component_slots() {
     local spec="$1"
@@ -135,6 +159,55 @@ count_component_slots() {
     echo "$total"
 }
 
+configure_smolvla_microbatch_geometry() {
+    SMOLVLA_ACTOR_WORLD_SIZE="$(count_component_slots "$SMOLVLA_ACTOR_GPUS")"
+    if [ -z "$SMOLVLA_ACTOR_WORLD_SIZE" ] || [ "$SMOLVLA_ACTOR_WORLD_SIZE" -le 0 ]; then
+        echo "ERROR: could not infer actor world size from SMOLVLA_ACTOR_GPUS=$SMOLVLA_ACTOR_GPUS"
+        exit 1
+    fi
+
+    SMOLVLA_ENV_WORLD_SIZE="$(count_component_slots "$SMOLVLA_ENV_GPUS")"
+    if [ -z "$SMOLVLA_ENV_WORLD_SIZE" ] || [ "$SMOLVLA_ENV_WORLD_SIZE" -le 0 ]; then
+        echo "ERROR: could not infer env world size from SMOLVLA_ENV_GPUS=$SMOLVLA_ENV_GPUS"
+        exit 1
+    fi
+
+    if [ "$SMOLVLA_AUTO_MICRO_GEOMETRY" != "true" ]; then
+        return
+    fi
+
+    if [ -n "$SMOLVLA_GLOBAL_BATCH_SIZE_USER_SET" ] || \
+       [ -n "$SMOLVLA_NUM_GROUP_ENVS_USER_SET" ] || \
+       [ -n "$SMOLVLA_GROUP_SIZE_USER_SET" ]; then
+        return
+    fi
+
+    local accumulation_denominator=$((SMOLVLA_MICRO_BATCH_SIZE * SMOLVLA_ACTOR_WORLD_SIZE))
+    local episodes_per_update=$((SMOLVLA_ROLLOUT_EPOCH * SMOLVLA_NUM_GROUP_ENVS * SMOLVLA_GROUP_SIZE))
+    local total_rollout_size=$((SMOLVLA_N_CHUNK_STEPS * episodes_per_update))
+    local per_actor_rollout_size=$((total_rollout_size / SMOLVLA_ACTOR_WORLD_SIZE))
+    local batch_size_per_actor=$((SMOLVLA_GLOBAL_BATCH_SIZE / SMOLVLA_ACTOR_WORLD_SIZE))
+    if (( SMOLVLA_GLOBAL_BATCH_SIZE % accumulation_denominator == 0 )) && \
+       (( total_rollout_size % SMOLVLA_ACTOR_WORLD_SIZE == 0 )) && \
+       (( SMOLVLA_GLOBAL_BATCH_SIZE % SMOLVLA_ACTOR_WORLD_SIZE == 0 )) && \
+       (( per_actor_rollout_size % batch_size_per_actor == 0 )); then
+        return
+    fi
+
+    case "$SMOLVLA_MICRO_BATCH_SIZE" in
+        24)
+            SMOLVLA_GROUP_SIZE="6"
+            SMOLVLA_GLOBAL_BATCH_SIZE=$((SMOLVLA_MICRO_BATCH_SIZE * SMOLVLA_ACTOR_WORLD_SIZE * 32))
+            SMOLVLA_GEOMETRY_NOTE="auto micro=24 geometry: group_size=6, grad_accum=32, global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE}"
+            ;;
+        28)
+            SMOLVLA_GROUP_SIZE="7"
+            SMOLVLA_GLOBAL_BATCH_SIZE=$((SMOLVLA_MICRO_BATCH_SIZE * SMOLVLA_ACTOR_WORLD_SIZE * 32))
+            SMOLVLA_GEOMETRY_NOTE="auto micro=28 geometry: group_size=7, grad_accum=32, global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE}"
+            ;;
+    esac
+}
+
 validate_smolvla_batch_geometry() {
     local numeric_keys=(
         SMOLVLA_MICRO_BATCH_SIZE
@@ -152,9 +225,10 @@ validate_smolvla_batch_geometry() {
         fi
     done
 
-    SMOLVLA_ACTOR_WORLD_SIZE="$(count_component_slots "$SMOLVLA_ACTOR_GPUS")"
-    if [ -z "$SMOLVLA_ACTOR_WORLD_SIZE" ] || [ "$SMOLVLA_ACTOR_WORLD_SIZE" -le 0 ]; then
-        echo "ERROR: could not infer actor world size from SMOLVLA_ACTOR_GPUS=$SMOLVLA_ACTOR_GPUS"
+    if (( SMOLVLA_NUM_GROUP_ENVS % SMOLVLA_ENV_WORLD_SIZE != 0 )); then
+        echo "ERROR: algorithm.num_group_envs must be divisible by env world size"
+        echo "       num_group_envs=$SMOLVLA_NUM_GROUP_ENVS env_world_size=$SMOLVLA_ENV_WORLD_SIZE"
+        echo "       This repo floors num_group_envs per env rank during config validation."
         exit 1
     fi
 
@@ -165,7 +239,8 @@ validate_smolvla_batch_geometry() {
         exit 1
     fi
 
-    SMOLVLA_TOTAL_ROLLOUT_SIZE=$((SMOLVLA_N_CHUNK_STEPS * SMOLVLA_ROLLOUT_EPOCH * SMOLVLA_NUM_GROUP_ENVS * SMOLVLA_GROUP_SIZE))
+    SMOLVLA_EPISODES_PER_UPDATE=$((SMOLVLA_ROLLOUT_EPOCH * SMOLVLA_NUM_GROUP_ENVS * SMOLVLA_GROUP_SIZE))
+    SMOLVLA_TOTAL_ROLLOUT_SIZE=$((SMOLVLA_N_CHUNK_STEPS * SMOLVLA_EPISODES_PER_UPDATE))
     if (( SMOLVLA_TOTAL_ROLLOUT_SIZE % SMOLVLA_ACTOR_WORLD_SIZE != 0 )); then
         echo "ERROR: total rollout size must divide evenly across actor ranks"
         echo "       total_rollout_size=$SMOLVLA_TOTAL_ROLLOUT_SIZE actor_world_size=$SMOLVLA_ACTOR_WORLD_SIZE"
@@ -182,6 +257,7 @@ validate_smolvla_batch_geometry() {
     fi
 }
 
+configure_smolvla_microbatch_geometry
 validate_smolvla_batch_geometry
 
 if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
@@ -227,9 +303,11 @@ echo "SMOLVLA_ACTOR_GPUS: $SMOLVLA_ACTOR_GPUS"
 echo "SMOLVLA_ROLLOUT_GPUS: $SMOLVLA_ROLLOUT_GPUS"
 echo "SMOLVLA_ENV_GPUS: $SMOLVLA_ENV_GPUS"
 echo "SMOLVLA_ACTOR_WORLD_SIZE: $SMOLVLA_ACTOR_WORLD_SIZE"
+echo "SMOLVLA_ENV_WORLD_SIZE: $SMOLVLA_ENV_WORLD_SIZE"
 echo "SMOLVLA_NUM_GROUP_ENVS: $SMOLVLA_NUM_GROUP_ENVS"
 echo "SMOLVLA_ROLLOUT_EPOCH: $SMOLVLA_ROLLOUT_EPOCH"
 echo "SMOLVLA_GROUP_SIZE: $SMOLVLA_GROUP_SIZE"
+echo "SMOLVLA_EPISODES_PER_UPDATE: $SMOLVLA_EPISODES_PER_UPDATE"
 echo "SMOLVLA_N_CHUNK_STEPS: $SMOLVLA_N_CHUNK_STEPS"
 echo "SMOLVLA_TOTAL_ROLLOUT_SIZE: $SMOLVLA_TOTAL_ROLLOUT_SIZE"
 echo "SMOLVLA_PER_ACTOR_ROLLOUT_SIZE: $SMOLVLA_PER_ACTOR_ROLLOUT_SIZE"
@@ -241,6 +319,13 @@ echo "SMOLVLA_LORA_ALPHA: $SMOLVLA_LORA_ALPHA"
 echo "SMOLVLA_LORA_DROPOUT: $SMOLVLA_LORA_DROPOUT"
 echo "SMOLVLA_COMPACT_REPLAY_IMAGES: $SMOLVLA_COMPACT_REPLAY_IMAGES"
 echo "SMOLVLA_REPLAY_IMAGE_DTYPE: $SMOLVLA_REPLAY_IMAGE_DTYPE"
+echo "SMOLVLA_ENV_ENABLE_OFFLOAD: $SMOLVLA_ENV_ENABLE_OFFLOAD"
+echo "SMOLVLA_ROLLOUT_ENABLE_OFFLOAD: $SMOLVLA_ROLLOUT_ENABLE_OFFLOAD"
+echo "SMOLVLA_ACTOR_ENABLE_OFFLOAD: $SMOLVLA_ACTOR_ENABLE_OFFLOAD"
+echo "SMOLVLA_AUTO_MICRO_GEOMETRY: $SMOLVLA_AUTO_MICRO_GEOMETRY"
+if [ -n "$SMOLVLA_GEOMETRY_NOTE" ]; then
+    echo "SMOLVLA_GEOMETRY_NOTE: $SMOLVLA_GEOMETRY_NOTE"
+fi
 
 # Keep Ray's Unix socket paths short enough for AF_UNIX limits.
 RAY_TMP_BASE_DEFAULT="/tmp/r_${USER:-u}_${SLURM_JOB_ID:-smolvla}"
@@ -250,7 +335,36 @@ export TMP="$RAY_TMPDIR"
 export TEMP="$RAY_TMPDIR"
 mkdir -p "$RAY_TMPDIR"
 chmod 700 "$RAY_TMPDIR" 2>/dev/null || true
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$RAY_TMPDIR/matplotlib}"
+mkdir -p "$MPLCONFIGDIR"
+export NUMBA_DISABLE_JIT="${NUMBA_DISABLE_JIT:-1}"
+export RLINF_ENV_START_TIMEOUT="${RLINF_ENV_START_TIMEOUT:-600}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
+export MAX_JOBS="${MAX_JOBS:-1}"
+export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}"
+export NCCL_ASYNC_ERROR_HANDLING="${NCCL_ASYNC_ERROR_HANDLING:-1}"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 echo "RAY_TMPDIR: $RAY_TMPDIR"
+echo "MPLCONFIGDIR: $MPLCONFIGDIR"
+echo "NUMBA_DISABLE_JIT: $NUMBA_DISABLE_JIT"
+echo "RLINF_ENV_START_TIMEOUT: $RLINF_ENV_START_TIMEOUT"
+echo "OMP_NUM_THREADS: $OMP_NUM_THREADS"
+echo "MKL_NUM_THREADS: $MKL_NUM_THREADS"
+echo "OPENBLAS_NUM_THREADS: $OPENBLAS_NUM_THREADS"
+echo "NUMEXPR_NUM_THREADS: $NUMEXPR_NUM_THREADS"
+echo "TOKENIZERS_PARALLELISM: $TOKENIZERS_PARALLELISM"
+echo "TORCHINDUCTOR_COMPILE_THREADS: $TORCHINDUCTOR_COMPILE_THREADS"
+echo "MAX_JOBS: $MAX_JOBS"
+echo "WANDB_INIT_TIMEOUT: $WANDB_INIT_TIMEOUT"
+echo "NCCL_ASYNC_ERROR_HANDLING: $NCCL_ASYNC_ERROR_HANDLING"
+echo "TORCH_NCCL_ASYNC_ERROR_HANDLING: $TORCH_NCCL_ASYNC_ERROR_HANDLING"
+echo "NCCL_DEBUG: $NCCL_DEBUG"
 echo ""
 
 REPO_ROOT="${CONTINUAL_VLA_RL_ROOT:-/home/s2758621/Continual_VLA_RL}"
@@ -500,7 +614,7 @@ for TASK_ID in $(seq "$TASK_START" "$TASK_END"); do
         break
     fi
 
-    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} smolvla.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} ++cluster.component_placement.actor=${SMOLVLA_ACTOR_GPUS} ++cluster.component_placement.rollout=${SMOLVLA_ROLLOUT_GPUS} ++cluster.component_placement.env=${SMOLVLA_ENV_GPUS} algorithm.num_group_envs=${SMOLVLA_NUM_GROUP_ENVS} algorithm.rollout_epoch=${SMOLVLA_ROLLOUT_EPOCH} algorithm.group_size=${SMOLVLA_GROUP_SIZE} actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING} actor.model.is_lora=${SMOLVLA_IS_LORA} actor.model.lora_rank=${SMOLVLA_LORA_RANK} actor.model.lora_alpha=${SMOLVLA_LORA_ALPHA} actor.model.lora_dropout=${SMOLVLA_LORA_DROPOUT} actor.model.compact_replay_images=${SMOLVLA_COMPACT_REPLAY_IMAGES} actor.model.replay_image_dtype=${SMOLVLA_REPLAY_IMAGE_DTYPE} env.train.num_images_in_input=2 env.eval.num_images_in_input=2"
+    OVERRIDES="env.fixed_task_ids=[${TASK_ID}] runner.logger.experiment_name=${EXPERIMENT_NAME} actor.seed=${SEED} smolvla.base_policy_path=${SMOLVLA_BASE_POLICY_PATH} ++cluster.component_placement.actor=${SMOLVLA_ACTOR_GPUS} ++cluster.component_placement.rollout=${SMOLVLA_ROLLOUT_GPUS} ++cluster.component_placement.env=${SMOLVLA_ENV_GPUS} algorithm.num_group_envs=${SMOLVLA_NUM_GROUP_ENVS} algorithm.rollout_epoch=${SMOLVLA_ROLLOUT_EPOCH} algorithm.group_size=${SMOLVLA_GROUP_SIZE} algorithm.logprob_type=action_level algorithm.entropy_type=action_level actor.micro_batch_size=${SMOLVLA_MICRO_BATCH_SIZE} actor.global_batch_size=${SMOLVLA_GLOBAL_BATCH_SIZE} actor.model.attn_implementation=${SMOLVLA_ATTN_IMPL} actor.model.use_amp=${SMOLVLA_USE_AMP} actor.model.gradient_checkpointing=${SMOLVLA_GRADIENT_CHECKPOINTING} actor.model.is_lora=${SMOLVLA_IS_LORA} actor.model.lora_rank=${SMOLVLA_LORA_RANK} actor.model.lora_alpha=${SMOLVLA_LORA_ALPHA} actor.model.lora_dropout=${SMOLVLA_LORA_DROPOUT} actor.model.compact_replay_images=${SMOLVLA_COMPACT_REPLAY_IMAGES} actor.model.replay_image_dtype=${SMOLVLA_REPLAY_IMAGE_DTYPE} env.enable_offload=${SMOLVLA_ENV_ENABLE_OFFLOAD} rollout.enable_offload=${SMOLVLA_ROLLOUT_ENABLE_OFFLOAD} actor.enable_offload=${SMOLVLA_ACTOR_ENABLE_OFFLOAD} env.train.num_images_in_input=2 env.eval.num_images_in_input=2"
 
     if [ -n "$CHECKPOINT_PATH" ]; then
         if [ "$SMOLVLA_IS_LORA" = "true" ]; then
